@@ -7,7 +7,6 @@ which is larger, not smaller.
 
 import argparse
 import json
-import re
 import sys
 import tempfile
 import wave
@@ -69,9 +68,6 @@ TOOLS = [
     },
 ]
 
-TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
-
-
 class Lights:
     def __init__(self):
         self.on = False
@@ -126,18 +122,22 @@ def tool_instructions():
 
 
 def parse_tool_calls(text):
+    """Pull tool calls out of the reply. The model sometimes repeats the opening tag."""
+    decoder = json.JSONDecoder()
     calls = []
-    chunks = TOOL_CALL_RE.findall(text)
-    if not chunks:
-        stripped = text.strip()
-        if stripped.startswith("{") and stripped.endswith("}"):
-            chunks = [stripped]
-    for raw in chunks:
+    index = 0
+    while True:
+        start = text.find("{", index)
+        if start < 0:
+            break
         try:
-            obj = json.loads(raw)
+            obj, end = decoder.raw_decode(text, start)
         except json.JSONDecodeError:
+            index = start + 1
             continue
-        name = obj.get("name")
+        index = end
+        if not isinstance(obj, dict) or not obj.get("name"):
+            continue
         args = obj.get("arguments", {})
         if isinstance(args, str):
             try:
@@ -146,8 +146,7 @@ def parse_tool_calls(text):
                 args = {}
         if not isinstance(args, dict):
             args = {}
-        if name:
-            calls.append((name, args))
+        calls.append((obj["name"], args))
     return calls
 
 
