@@ -53,7 +53,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "set_light_color",
-            "description": "Change the light color. Does not change whether the lights are on.",
+            "description": "Change the light color and turn the lights on.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -97,6 +97,7 @@ class Lights:
 
     def set_color(self, color):
         self.color = _color(color)
+        self.on = True
         return self._emit()
 
 
