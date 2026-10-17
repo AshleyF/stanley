@@ -1,0 +1,177 @@
+"""One GPT Live session for the reading lamp at 192.168.4.38."""
+
+import asyncio, base64, contextlib, json, os, signal, sys, threading
+from pathlib import Path
+
+HOST, RATE = "192.168.4.38", 24000
+COLORS = {"purple": (280, 100, 100), "red": (0, 100, 100), "blue": (240, 100, 100), "green": (120, 100, 100), "warm white": (30, 20, 100)}
+SESSION = {
+    "model": "gpt-live-1",
+    "instructions": "You are Stanley in the living room. One short sentence. Delegate any request about the reading lamp.",
+    "audio": {"format": {"type": "audio/pcm", "rate": RATE}, "output": {"voice": "marin"}},
+    "delegation": {
+        "type": "responses",
+        "responses": {
+            "model": "gpt-5.6-luna",
+            "instructions": "Call set_lamp for the living-room reading lamp. on is required. A color turns the lamp on. Colors: purple, red, blue, green, warm white.",
+            "tool_choice": "auto",
+            "parallel_tool_calls": False,
+            "reasoning": {"effort": "minimal"},
+            "tools": [{
+                "type": "function",
+                "name": "set_lamp",
+                "description": "Turn the living-room reading lamp on or off, and optionally set its color.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "on": {"type": "boolean"},
+                        "color": {"type": "string", "enum": list(COLORS)},
+                    },
+                    "required": ["on"],
+                },
+            }],
+        },
+    },
+}
+
+def load_env():
+    path = Path(__file__).with_name(".env")
+    if not path.is_file():
+        sys.exit(f"missing {path}. Copy .env.example and set OPENAI_API_KEY.")
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip("'\""))
+    if not os.environ.get("OPENAI_API_KEY"):
+        sys.exit(f"Set OPENAI_API_KEY in {path}")
+
+def color_name(value):
+    text = " ".join(str(value).split()).lower()
+    if text not in COLORS:
+        raise ValueError(f"unknown color: {text or value}")
+    return text
+
+async def drive(on, color=None):
+    from kasa import DeviceConfig, Module
+    from kasa.iot import IotBulb
+    bulb = None
+    try:
+        bulb = IotBulb(HOST, config=DeviceConfig(host=HOST, timeout=5))
+        await bulb.update()
+        if not on:
+            await bulb.turn_off()
+            print("\nlights off", flush=True)
+            return {"on": False}
+        await bulb.turn_on()
+        if not color:
+            print("\nlights on", flush=True)
+            return {"on": True}
+        name = color_name(color)
+        hue, saturation, value = COLORS[name]
+        await bulb.modules[Module.Light].set_hsv(hue, saturation, value)
+        print(f"\nlights on, {name}", flush=True)
+        return {"on": True, "color": name}
+    except Exception as exc:
+        text = str(exc).strip() or type(exc).__name__
+        print(f"\n{text}", flush=True)
+        return {"error": text}
+    finally:
+        if bulb is not None:
+            with contextlib.suppress(Exception):
+                await bulb.disconnect()
+
+class Speaker:
+    def __init__(self):
+        import numpy as np, sounddevice as sd
+        self.np, self.buf, self.lock = np, bytearray(), threading.Lock()
+        self.stream = sd.OutputStream(samplerate=RATE, channels=1, dtype="int16", callback=self.play, blocksize=RATE // 50)
+        self.stream.start()
+
+    def play(self, outdata, frames, _time, _status):
+        need = frames * 2
+        with self.lock:
+            chunk = bytes(self.buf[:need])
+            del self.buf[:need]
+        outdata[:] = self.np.frombuffer(chunk.ljust(need, b"\x00"), dtype="int16").reshape(-1, 1)
+
+    def write(self, pcm):
+        with self.lock:
+            self.buf += pcm
+
+    def close(self):
+        self.stream.stop()
+        self.stream.close()
+
+async def send_mic(connection):
+    import sounddevice as sd
+    loop, queue = asyncio.get_running_loop(), asyncio.Queue()
+
+    def heard(indata, _frames, _time, _status):
+        loop.call_soon_threadsafe(queue.put_nowait, indata.tobytes())
+
+    with sd.InputStream(samplerate=RATE, channels=1, dtype="int16", callback=heard, blocksize=RATE // 50):
+        while True:
+            chunk = await queue.get()
+            await connection.session.input_audio.append(audio=base64.b64encode(chunk).decode("ascii"))
+
+def item_of(event):
+    inner = getattr(event, "event", None)
+    item = getattr(inner, "item", None)
+    if getattr(inner, "type", None) == "response.output_item.done" and getattr(item, "type", None) == "function_call":
+        return item
+    return None
+
+async def finish_call(connection, item):
+    raw = item.arguments or "{}"
+    try:
+        args = json.loads(raw) if isinstance(raw, str) else dict(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        args = {}
+    result = await drive(bool(args.get("on")), args.get("color"))
+    await connection.response.item.create(
+        event_id=f"result_{item.call_id}",
+        item={"type": "function_call_output", "call_id": item.call_id, "output": json.dumps(result)},
+    )
+    await connection.response.create(event_id=f"continue_{item.call_id}")
+
+async def main():
+    from openai import AsyncOpenAI
+    load_env()
+    speaker, who = Speaker(), None
+    async with AsyncOpenAI() as client, client.live.connect(max_retries=0) as connection:
+        loop, mic = asyncio.get_running_loop(), None
+
+        def stop():
+            asyncio.create_task(connection.session.close())
+
+        loop.add_signal_handler(signal.SIGINT, stop)
+        await connection.session.start(session=SESSION, event_id="start")
+        try:
+            async for event in connection:
+                kind = event.type
+                if kind == "session.started":
+                    print(f"session {event.session.id}. Ctrl-C stops.", flush=True)
+                    mic = asyncio.create_task(send_mic(connection))
+                elif kind == "session.output_audio.delta":
+                    speaker.write(base64.b64decode(event.delta))
+                elif kind in ("session.input_transcript.delta", "session.output_transcript.delta"):
+                    name = "you" if kind.startswith("session.input") else "stanley"
+                    if name != who:
+                        print(f"\n{name}: ", end="", flush=True)
+                        who = name
+                    print(event.delta, end="", flush=True)
+                elif kind == "response.event" and (item := item_of(event)):
+                    asyncio.create_task(finish_call(connection, item))
+                elif kind == "error":
+                    print(f"\n{event}", flush=True)
+                elif kind == "session.closed":
+                    break
+        finally:
+            if mic is not None:
+                mic.cancel()
+            speaker.close()
+
+if __name__ == "__main__":
+    asyncio.run(main())
