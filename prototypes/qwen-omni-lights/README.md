@@ -14,7 +14,7 @@ pip install -r requirements.txt
 python lights.py request.wav
 ```
 
-Leave off the wav path to record from the microphone when a capture device is present. The reply plays on an output device when one exists. Otherwise it is written to `reply.wav` in the working directory. Microphone and speaker playback need PortAudio (`brew install portaudio` on a Mac, `libportaudio2` on Linux).
+Leave off the wav path to record from the microphone when a capture device is present. The model loads first, then it listens until a short silence after speech. It is not full duplex. This transformers build returns the spoken reply as one waveform at the end of `generate()`, and playback starts then. Otherwise the reply is written to `reply.wav` in the working directory. Microphone and speaker playback need PortAudio (`brew install portaudio` on a Mac, `libportaudio2` on Linux).
 
 On a Linux machine with no GPU, install the CPU wheels from the PyTorch CPU index instead of the PyPI torch line, then the same requirements file:
 
