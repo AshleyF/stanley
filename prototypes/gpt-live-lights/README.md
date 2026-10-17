@@ -1,6 +1,6 @@
 # GPT Live lights
 
-One GPT Live session for the living-room reading lamp at `192.168.4.38`. The session stays open. The voice model is `gpt-live-1`. Lamp changes are a `set_lamp` tool on the Responses backend, and this script runs that tool with `python-kasa`.
+One realtime session for the living-room reading lamp at `192.168.4.38`. The model is `gpt-realtime-2.1`. It hears, speaks, and calls `set_lamp` itself. This script runs that call with `python-kasa`. The session stays open.
 
 Copy `.env.example` to `.env` and set `OPENAI_API_KEY`. The `.env` file stays on this machine.
 

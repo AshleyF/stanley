@@ -1,4 +1,4 @@
-"""One GPT Live session for the reading lamp at 192.168.4.38."""
+"""One realtime session for the reading lamp at 192.168.4.38."""
 
 import asyncio, base64, contextlib, json, os, signal, sys, threading
 from pathlib import Path
@@ -6,32 +6,28 @@ from pathlib import Path
 HOST, RATE = "192.168.4.38", 24000
 COLORS = {"purple": (280, 100, 100), "red": (0, 100, 100), "blue": (240, 100, 100), "green": (120, 100, 100), "warm white": (30, 20, 100)}
 SESSION = {
-    "model": "gpt-live-1",
-    "instructions": "You are Stanley in the living room. One short sentence. Delegate any request about the reading lamp.",
-    "audio": {"format": {"type": "audio/pcm", "rate": RATE}, "output": {"voice": "marin"}},
-    "delegation": {
-        "type": "responses",
-        "responses": {
-            "model": "gpt-5.6-luna",
-            "instructions": "Call set_lamp for the living-room reading lamp. on is required. A color turns the lamp on. Colors: purple, red, blue, green, warm white.",
-            "tool_choice": "auto",
-            "parallel_tool_calls": False,
-            "reasoning": {"effort": "none"},
-            "tools": [{
-                "type": "function",
-                "name": "set_lamp",
-                "description": "Turn the living-room reading lamp on or off, and optionally set its color.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "on": {"type": "boolean"},
-                        "color": {"type": "string", "enum": list(COLORS)},
-                    },
-                    "required": ["on"],
-                },
-            }],
-        },
+    "type": "realtime",
+    "model": "gpt-realtime-2.1",
+    "output_modalities": ["audio"],
+    "instructions": "You are Stanley in the living room. One short sentence. Call set_lamp for the reading lamp. A color turns it on. Colors: purple, red, blue, green, warm white.",
+    "tool_choice": "auto",
+    "audio": {
+        "input": {"format": {"type": "audio/pcm", "rate": RATE}},
+        "output": {"format": {"type": "audio/pcm", "rate": RATE}, "voice": "marin"},
     },
+    "tools": [{
+        "type": "function",
+        "name": "set_lamp",
+        "description": "Turn the living-room reading lamp on or off, and optionally set its color.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "on": {"type": "boolean"},
+                "color": {"type": "string", "enum": list(COLORS)},
+            },
+            "required": ["on"],
+        },
+    }],
 }
 
 def load_env():
@@ -114,62 +110,54 @@ async def send_mic(connection):
     with sd.InputStream(samplerate=RATE, channels=1, dtype="int16", callback=heard, blocksize=RATE // 50):
         while True:
             chunk = await queue.get()
-            await connection.session.input_audio.append(audio=base64.b64encode(chunk).decode("ascii"))
+            await connection.input_audio_buffer.append(audio=base64.b64encode(chunk).decode("ascii"))
 
-def item_of(event):
-    inner = getattr(event, "event", None)
-    item = getattr(inner, "item", None)
-    if getattr(inner, "type", None) == "response.output_item.done" and getattr(item, "type", None) == "function_call":
-        return item
-    return None
-
-async def finish_call(connection, item):
-    raw = item.arguments or "{}"
+async def finish_call(connection, call_id, arguments):
     try:
-        args = json.loads(raw) if isinstance(raw, str) else dict(raw)
-    except (json.JSONDecodeError, TypeError, ValueError):
+        args = json.loads(arguments or "{}")
+    except json.JSONDecodeError:
         args = {}
     result = await drive(bool(args.get("on")), args.get("color"))
-    await connection.response.item.create(
-        event_id=f"result_{item.call_id}",
-        item={"type": "function_call_output", "call_id": item.call_id, "output": json.dumps(result)},
-    )
-    await connection.response.create(event_id=f"continue_{item.call_id}")
+    await connection.conversation.item.create(item={
+        "type": "function_call_output",
+        "call_id": call_id,
+        "output": json.dumps(result),
+    })
+    await connection.response.create()
 
 async def main():
     from openai import AsyncOpenAI
     load_env()
-    speaker, who = Speaker(), None
-    async with AsyncOpenAI() as client, client.live.connect(max_retries=0) as connection:
+    speaker, who, seen = Speaker(), None, set()
+    async with AsyncOpenAI() as client, client.realtime.connect(model="gpt-realtime-2.1", max_retries=0) as connection:
         loop, mic = asyncio.get_running_loop(), None
 
         def stop():
-            asyncio.create_task(connection.session.close())
+            asyncio.create_task(connection.close())
 
         loop.add_signal_handler(signal.SIGINT, stop)
-        await connection.session.start(session=SESSION, event_id="start")
+        await connection.session.update(session=SESSION, event_id="start")
         try:
             async for event in connection:
                 kind = event.type
-                if kind == "session.started":
-                    print(f"session {event.session.id}. Ctrl-C stops.", flush=True)
-                    mic = asyncio.create_task(send_mic(connection))
-                elif kind == "session.output_audio.delta":
+                if kind == "session.updated":
+                    print(f"session {getattr(event.session, 'id', 'ready')}. Ctrl-C stops.", flush=True)
+                    if mic is None:
+                        mic = asyncio.create_task(send_mic(connection))
+                elif kind == "response.output_audio.delta":
                     speaker.write(base64.b64decode(event.delta))
-                elif kind in ("session.input_transcript.delta", "session.output_transcript.delta"):
-                    name = "you" if kind.startswith("session.input") else "stanley"
-                    if name != who:
-                        print(f"\n{name}: ", end="", flush=True)
-                        who = name
+                elif kind == "response.output_audio_transcript.delta" and event.delta:
+                    if who != "stanley":
+                        print("\nstanley: ", end="", flush=True)
+                        who = "stanley"
                     print(event.delta, end="", flush=True)
-                elif kind == "response.event" and (item := item_of(event)):
-                    asyncio.create_task(finish_call(connection, item))
+                elif kind == "response.function_call_arguments.done" and event.call_id not in seen:
+                    seen.add(event.call_id)
+                    asyncio.create_task(finish_call(connection, event.call_id, event.arguments))
                 elif kind == "error":
                     print(f"\n{event}", flush=True)
                     if getattr(getattr(event, "error", None), "client_event_id", None) == "start":
                         break
-                elif kind == "session.closed":
-                    break
         finally:
             if mic is not None:
                 mic.cancel()
