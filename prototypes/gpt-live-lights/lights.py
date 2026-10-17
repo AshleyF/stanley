@@ -4,30 +4,45 @@ import asyncio, base64, contextlib, json, os, signal, sys, threading
 from pathlib import Path
 
 HOST, RATE = "192.168.4.38", 24000
-COLORS = {"purple": (280, 100, 100), "red": (0, 100, 100), "blue": (240, 100, 100), "green": (120, 100, 100), "warm white": (30, 20, 100)}
 SESSION = {
     "type": "realtime",
     "model": "gpt-realtime-2.1",
     "output_modalities": ["audio"],
-    "instructions": "You are Stanley in the living room. One short sentence. Call set_lamp for the reading lamp. A color turns it on. Colors: purple, red, blue, green, warm white.",
+    "instructions": (
+        "You control only the living-room reading lamp. "
+        "Call set_lamp only when the person clearly asks to turn that lamp on or off or to change its color. "
+        "Choose hue from 0 to 360, saturation from 0 to 100, and brightness from 0 to 100. "
+        "If the audio is silence, noise, or about anything else, call wait_for_user. "
+        "Say nothing unless you changed the lamp."
+    ),
     "tool_choice": "auto",
     "audio": {
         "input": {"format": {"type": "audio/pcm", "rate": RATE}},
         "output": {"format": {"type": "audio/pcm", "rate": RATE}, "voice": "marin"},
     },
-    "tools": [{
-        "type": "function",
-        "name": "set_lamp",
-        "description": "Turn the living-room reading lamp on or off, and optionally set its color.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "on": {"type": "boolean"},
-                "color": {"type": "string", "enum": list(COLORS)},
+    "tools": [
+        {
+            "type": "function",
+            "name": "set_lamp",
+            "description": "Turn the living-room reading lamp on or off, and set its color as HSV. A color turns it on.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "on": {"type": "boolean"},
+                    "hue": {"type": "integer", "minimum": 0, "maximum": 360},
+                    "saturation": {"type": "integer", "minimum": 0, "maximum": 100},
+                    "brightness": {"type": "integer", "minimum": 0, "maximum": 100},
+                },
+                "required": ["on"],
             },
-            "required": ["on"],
         },
-    }],
+        {
+            "type": "function",
+            "name": "wait_for_user",
+            "description": "Call this when the audio does not ask to change the reading lamp. Ends the turn with no spoken reply.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    ],
 }
 
 def load_env():
@@ -43,13 +58,16 @@ def load_env():
     if not os.environ.get("OPENAI_API_KEY"):
         sys.exit(f"Set OPENAI_API_KEY in {path}")
 
-def color_name(value):
-    text = " ".join(str(value).split()).lower()
-    if text not in COLORS:
-        raise ValueError(f"unknown color: {text or value}")
-    return text
+def clamp(value, lo, hi, default):
+    if value is None:
+        return default
+    try:
+        number = int(round(float(value)))
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(hi, number))
 
-async def drive(on, color=None):
+async def drive(on, hue=None, saturation=None, brightness=None):
     from kasa import DeviceConfig, Module
     from kasa.iot import IotBulb
     bulb = None
@@ -61,14 +79,13 @@ async def drive(on, color=None):
             print("\nlights off", flush=True)
             return {"on": False}
         await bulb.turn_on()
-        if not color:
+        if hue is None:
             print("\nlights on", flush=True)
             return {"on": True}
-        name = color_name(color)
-        hue, saturation, value = COLORS[name]
-        await bulb.modules[Module.Light].set_hsv(hue, saturation, value)
-        print(f"\nlights on, {name}", flush=True)
-        return {"on": True, "color": name}
+        hsv = (clamp(hue, 0, 360, 0), clamp(saturation, 0, 100, 100), clamp(brightness, 0, 100, 100))
+        await bulb.modules[Module.Light].set_hsv(*hsv)
+        print(f"\nlights on, hsv {hsv[0]} {hsv[1]} {hsv[2]}", flush=True)
+        return {"on": True, "hue": hsv[0], "saturation": hsv[1], "brightness": hsv[2]}
     except Exception as exc:
         text = str(exc).strip() or type(exc).__name__
         print(f"\n{text}", flush=True)
@@ -96,6 +113,10 @@ class Speaker:
         with self.lock:
             self.buf += pcm
 
+    def clear(self):
+        with self.lock:
+            self.buf.clear()
+
     def close(self):
         self.stream.stop()
         self.stream.close()
@@ -112,23 +133,37 @@ async def send_mic(connection):
             chunk = await queue.get()
             await connection.input_audio_buffer.append(audio=base64.b64encode(chunk).decode("ascii"))
 
-async def finish_call(connection, call_id, arguments):
+async def finish_call(connection, speaker, state, name, call_id, arguments):
     try:
         args = json.loads(arguments or "{}")
     except json.JSONDecodeError:
         args = {}
-    result = await drive(bool(args.get("on")), args.get("color"))
+    if name == "wait_for_user":
+        state["quiet"] = True
+        speaker.clear()
+        with contextlib.suppress(Exception):
+            await connection.response.cancel()
+            await connection.output_audio_buffer.clear()
+        result = {"wait": True}
+        print("\nignored", flush=True)
+    else:
+        state["quiet"] = False
+        result = await drive(bool(args.get("on")), args.get("hue"), args.get("saturation"), args.get("brightness"))
     await connection.conversation.item.create(item={
         "type": "function_call_output",
         "call_id": call_id,
         "output": json.dumps(result),
     })
-    await connection.response.create()
+    if name != "wait_for_user":
+        await connection.response.create(response={
+            "tool_choice": "none",
+            "instructions": "One short sentence confirming the lamp. Do not call a tool.",
+        })
 
 async def main():
     from openai import AsyncOpenAI
     load_env()
-    speaker, who, seen = Speaker(), None, set()
+    speaker, who, seen, state = Speaker(), None, set(), {"quiet": False}
     async with AsyncOpenAI() as client, client.realtime.connect(model="gpt-realtime-2.1", max_retries=0) as connection:
         loop, mic = asyncio.get_running_loop(), None
 
@@ -144,16 +179,18 @@ async def main():
                     print(f"session {getattr(event.session, 'id', 'ready')}. Ctrl-C stops.", flush=True)
                     if mic is None:
                         mic = asyncio.create_task(send_mic(connection))
-                elif kind == "response.output_audio.delta":
+                elif kind == "input_audio_buffer.speech_started":
+                    state["quiet"] = False
+                elif kind == "response.output_audio.delta" and not state["quiet"]:
                     speaker.write(base64.b64decode(event.delta))
-                elif kind == "response.output_audio_transcript.delta" and event.delta:
+                elif kind == "response.output_audio_transcript.delta" and event.delta and not state["quiet"]:
                     if who != "stanley":
                         print("\nstanley: ", end="", flush=True)
                         who = "stanley"
                     print(event.delta, end="", flush=True)
                 elif kind == "response.function_call_arguments.done" and event.call_id not in seen:
                     seen.add(event.call_id)
-                    asyncio.create_task(finish_call(connection, event.call_id, event.arguments))
+                    asyncio.create_task(finish_call(connection, speaker, state, event.name, event.call_id, event.arguments))
                 elif kind == "error":
                     print(f"\n{event}", flush=True)
                     if getattr(getattr(event, "error", None), "client_event_id", None) == "start":
