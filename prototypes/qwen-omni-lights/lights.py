@@ -1,11 +1,12 @@
-"""Speech in, speech out, with lights that exist only in this process.
+"""Speech in, speech out, and the living-room reading bulb.
 
-The checkpoint is Qwen/Qwen2.5-Omni-3B: the smallest official Qwen Omni model
-that both hears and speaks. Qwen3-Omni's local weights are the 30B-A3B mixture,
-which is larger, not smaller.
+The checkpoint is Qwen/Qwen2.5-Omni-3B. The bulb is the Kasa color lamp at
+192.168.4.204 (reading / overhanging / black).
 """
 
 import argparse
+import asyncio
+import contextlib
 import json
 import sys
 import tempfile
@@ -16,6 +17,7 @@ import torch
 from transformers import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcessor
 
 MODEL_ID = "Qwen/Qwen2.5-Omni-3B"
+BULB_HOST = "192.168.4.204"
 SAMPLE_RATE_OUT = 24000
 # Required by the talker. Extra instructions live in the user turn so this
 # sentence stays intact and speech generation still runs.
@@ -24,18 +26,27 @@ SYSTEM_TEXT = (
     "capable of perceiving auditory and visual inputs, as well as generating text and speech."
 )
 
+# hue, saturation, value. Saturation and value are percentages.
+COLORS = {
+    "purple": (280, 100, 100),
+    "red": (0, 100, 100),
+    "blue": (240, 100, 100),
+    "green": (120, 100, 100),
+    "warm white": (30, 20, 100),
+}
+
 TOOLS = [
     {
         "type": "function",
         "function": {
             "name": "lights_on",
-            "description": "Turn the lights on. Omit color to keep the last color.",
+            "description": "Turn the living-room reading lamp on. Optional color: purple, red, blue, green, or warm white.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "color": {
                         "type": "string",
-                        "description": "Color name, such as warm white or purple.",
+                        "description": "purple, red, blue, green, or warm white. Setting a color also turns the lamp on.",
                     }
                 },
             },
@@ -45,7 +56,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "lights_off",
-            "description": "Turn the lights off. The last color is kept for the next time they turn on.",
+            "description": "Turn the living-room reading lamp off.",
             "parameters": {"type": "object", "properties": {}},
         },
     },
@@ -53,13 +64,13 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "set_light_color",
-            "description": "Change the light color and turn the lights on.",
+            "description": "Set the living-room reading lamp color and turn it on. Colors: purple, red, blue, green, warm white.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "color": {
                         "type": "string",
-                        "description": "Color name, such as purple.",
+                        "description": "purple, red, blue, green, or warm white.",
                     }
                 },
                 "required": ["color"],
@@ -68,50 +79,80 @@ TOOLS = [
     },
 ]
 
-class Lights:
-    def __init__(self):
-        self.on = False
-        self.color = "warm white"
 
-    def state(self):
-        return {"on": self.on, "color": self.color}
-
-    def line(self):
-        if self.on:
-            return f"lights on, {self.color}"
-        return "lights off"
-
-    def _emit(self):
-        print(self.line(), flush=True)
-        return self.state()
-
-    def turn_on(self, color=None):
-        if color:
-            self.color = _color(color)
-        self.on = True
-        return self._emit()
-
-    def turn_off(self):
-        self.on = False
-        return self._emit()
-
-    def set_color(self, color):
-        self.color = _color(color)
-        self.on = True
-        return self._emit()
-
-
-def _color(value):
+def color_name(value):
     text = " ".join(str(value).split()).lower()
-    if not text:
-        raise ValueError("color is empty")
+    if text not in COLORS:
+        raise ValueError(f"unknown color: {text or value}")
     return text
+
+
+def _error_text(exc):
+    return str(exc).strip() or type(exc).__name__
+
+
+async def drive(action, color=None):
+    """On, off, or color for the one reading bulb. A network error is printed and returned."""
+    from kasa import DeviceConfig, Module, SmartBulb
+
+    bulb = None
+    try:
+        bulb = SmartBulb(BULB_HOST, config=DeviceConfig(host=BULB_HOST, timeout=5))
+        await bulb.update()
+        if action == "off":
+            await bulb.turn_off()
+            print("lights off", flush=True)
+            return {"on": False}
+        await bulb.turn_on()
+        if color:
+            name = color_name(color)
+            hue, saturation, value = COLORS[name]
+            await bulb.modules[Module.Light].set_hsv(hue, saturation, value)
+            print(f"lights on, {name}", flush=True)
+            return {"on": True, "color": name, "hsv": [hue, saturation, value]}
+        print("lights on", flush=True)
+        return {"on": True}
+    except Exception as exc:
+        text = _error_text(exc)
+        print(text, flush=True)
+        return {"error": text}
+    finally:
+        if bulb is not None:
+            with contextlib.suppress(Exception):
+                await bulb.disconnect()
+
+
+def run_tool(name, args):
+    try:
+        if name == "lights_off":
+            return asyncio.run(drive("off"))
+        if name == "lights_on":
+            color = args.get("color")
+            if color:
+                color_name(color)
+            return asyncio.run(drive("on", color))
+        if name == "set_light_color":
+            if not args.get("color"):
+                print("color is required", flush=True)
+                return {"error": "color is required"}
+            color_name(args["color"])
+            return asyncio.run(drive("on", args["color"]))
+    except ValueError as exc:
+        text = _error_text(exc)
+        print(text, flush=True)
+        return {"error": text}
+    except Exception as exc:
+        text = _error_text(exc)
+        print(text, flush=True)
+        return {"error": text}
+    return {"error": f"unknown tool {name}"}
 
 
 def tool_instructions():
     signatures = "\n".join(json.dumps(tool) for tool in TOOLS)
     return (
         "The attached audio is a person talking to the house.\n"
+        "The only lamp is the living-room reading lamp.\n"
         "You may call one or more functions to assist with the user query.\n"
         "You are provided with function signatures within <tools></tools> XML tags:\n"
         f"<tools>\n{signatures}\n</tools>\n"
@@ -149,21 +190,6 @@ def parse_tool_calls(text):
             args = {}
         calls.append((obj["name"], args))
     return calls
-
-
-def run_tool(lights, name, args):
-    try:
-        if name == "lights_on":
-            return lights.turn_on(args.get("color"))
-        if name == "lights_off":
-            return lights.turn_off()
-        if name == "set_light_color":
-            if not args.get("color"):
-                return {"error": "color is required", **lights.state()}
-            return lights.set_color(args["color"])
-    except ValueError as exc:
-        return {"error": str(exc), **lights.state()}
-    return {"error": f"unknown tool {name}"}
 
 
 def input_devices():
@@ -325,7 +351,7 @@ def messages_for(wav_path, extra_user=None, earlier=None):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run Qwen2.5-Omni-3B on a spoken lights request.")
+    parser = argparse.ArgumentParser(description="Run Qwen2.5-Omni-3B on a spoken request for the reading lamp.")
     parser.add_argument(
         "wav",
         nargs="?",
@@ -347,7 +373,6 @@ def main():
         record_mic(wav_path)
         cleanup = wav_path
 
-    lights = Lights()
     try:
         print(f"loading {MODEL_ID} on cpu", flush=True)
         model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
@@ -366,12 +391,13 @@ def main():
 
         results = []
         for name, tool_args in parse_tool_calls(reply):
-            results.append({"name": name, "result": run_tool(lights, name, tool_args)})
+            results.append({"name": name, "result": run_tool(name, tool_args)})
 
         follow = (
             "Tool results:\n"
             + json.dumps(results)
-            + "\nSpeak one short sentence confirming the lights. Do not call a tool."
+            + "\nSpeak one short sentence confirming the reading lamp. "
+            "If a result has an error, say it could not be reached. Do not call a tool."
         )
         spoken_inputs = prepare(processor, messages_for(wav_path, extra_user=follow, earlier=reply))
         spoken = generate(model, spoken_inputs, speak=True)

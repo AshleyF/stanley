@@ -1,3 +1,4 @@
+python-kasa==0.11.0.1
 transformers==5.20.1
 accelerate==1.15.0
 soundfile==0.14.0
