@@ -122,8 +122,8 @@ def load_wav(path):
     return np.ascontiguousarray(data, dtype=np.float32)
 
 def complete(model, processor, wav, speak, earlier=None, extra=None):
-    # Speech requires the exact system sentence. Tool schemas are registered on the text pass only.
-    system = SYSTEM if speak else f"{SYSTEM}\n\n{tool_block()}"
+    # Speech requires the exact system sentence. The text pass is tool registration only, and it must open with a tool call.
+    system = SYSTEM if speak else tool_block()
     user = [{"type": "audio", "audio": load_wav(wav)}]
     messages = [{"role": "system", "content": [{"type": "text", "text": system}]}, {"role": "user", "content": user}]
     if earlier:
@@ -134,9 +134,15 @@ def complete(model, processor, wav, speak, earlier=None, extra=None):
     for key, value in batch.items():
         if torch.is_tensor(value):
             batch[key] = value.to("cpu", dtype=torch.bfloat16 if value.is_floating_point() else value.dtype)
-    kwargs = {"thinker_do_sample": False, "thinker_max_new_tokens": 64 if speak else 256, "generation_mode": "audio" if speak else "text"}
+    if not speak:
+        prefix = processor.tokenizer.encode("<tool_call>\n", add_special_tokens=False, return_tensors="pt").to(batch["input_ids"].device)
+        batch["input_ids"] = torch.cat([batch["input_ids"], prefix], dim=-1)
+        mask = batch.get("attention_mask")
+        if torch.is_tensor(mask):
+            batch["attention_mask"] = torch.cat([mask, torch.ones_like(prefix)], dim=-1)
+    kwargs = {"thinker_do_sample": False, "thinker_max_new_tokens": 64 if speak else 96, "generation_mode": "audio" if speak else "text"}
     if speak:
-        kwargs.update(speaker="Chelsie", talker_do_sample=False, talker_max_new_tokens=512)
+        kwargs.update(speaker="Chelsie", talker_max_new_tokens=512)
     with torch.inference_mode():
         generated = model.generate(**batch, **kwargs)
     ids = generated[0] if isinstance(generated, tuple) else generated
@@ -145,6 +151,8 @@ def complete(model, processor, wav, speak, earlier=None, extra=None):
     n = batch["input_ids"].shape[-1]
     ids = ids[:, n:] if ids.shape[-1] > n else ids
     text = processor.batch_decode(ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0].strip()
+    if not speak:
+        text = "<tool_call>\n" + text
     audio = generated[1] if isinstance(generated, tuple) and len(generated) > 1 else None
     audio = (audio[0] if audio else None) if isinstance(audio, (list, tuple)) else audio
     samples = None if audio is None else audio.reshape(-1).detach().float().cpu().numpy()
@@ -169,7 +177,7 @@ def record_until_silence(rate=16000):
     import numpy as np, sounddevice as sd, soundfile as sf
     frame, quiet_need, speech = rate // 20, 12, 500
     blocks, heard, quiet = [], False, 0
-    print("Listening. Stops after a short silence.", flush=True)
+    print("Listening until a short silence. Ctrl-C stops.", flush=True)
     with sd.InputStream(samplerate=rate, channels=1, dtype="int16", blocksize=frame, device=device_index("in")) as stream:
         while len(blocks) < 20 * 15:
             block, _ = stream.read(frame)
@@ -185,11 +193,30 @@ def record_until_silence(rate=16000):
     print(f"Recorded {path}", flush=True)
     return path
 
+def one_turn(model, processor, wav):
+    print("Generation started.", flush=True)
+    reply, _ = complete(model, processor, wav, speak=False)
+    print(f"model: {reply}", flush=True)
+    calls = tool_calls(reply)
+    if calls:
+        results = [{"name": name, "result": run_tool(name, args)} for name, args in calls]
+        follow = "<tool_response>\n" + json.dumps(results) + "\n</tool_response>\nSpeak one short sentence confirming the reading lamp. If a result has an error, say it could not be reached."
+    else:
+        print("no tool call", flush=True)
+        follow = "You did not call a tool. Say you did not catch a request for the reading lamp. Do not claim the lamp changed."
+    text, samples = complete(model, processor, wav, True, reply, follow)
+    if samples is None or len(samples) == 0:
+        print("model returned no audio", flush=True)
+        return
+    # The reply is not chunked: generate() returns the whole waveform, then playback starts.
+    play_or_save(samples)
+    if text:
+        print(text, flush=True)
+
 def main():
     parser = argparse.ArgumentParser(description="Spoken request for the living-room reading lamp.")
-    parser.add_argument("wav", nargs="?", help="Wav path. Omit to use the microphone when one is present.")
+    parser.add_argument("wav", nargs="?", help="Wav path. Omit to keep listening on the microphone.")
     given = parser.parse_args().wav
-    cleanup = None
     if given:
         wav = Path(given).expanduser().resolve()
         if not wav.is_file():
@@ -202,31 +229,18 @@ def main():
     model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
         MODEL_ID, torch_dtype=torch.bfloat16, device_map="cpu", attn_implementation="sdpa").eval()
     processor = Qwen2_5OmniProcessor.from_pretrained(MODEL_ID)
-    for key in ("temperature", "top_p", "top_k"):
-        setattr(model.generation_config, key, None)
+    if wav is not None:
+        one_turn(model, processor, wav)
+        return
     try:
-        if wav is None:
-            wav = cleanup = record_until_silence()
-        print("Generation started.", flush=True)
-        reply, _ = complete(model, processor, wav, speak=False)
-        print(f"model: {reply}", flush=True)
-        calls = tool_calls(reply)
-        if calls:
-            results = [{"name": name, "result": run_tool(name, args)} for name, args in calls]
-            follow = "<tool_response>\n" + json.dumps(results) + "\n</tool_response>\nSpeak one short sentence confirming the reading lamp. If a result has an error, say it could not be reached."
-        else:
-            print("no tool call", flush=True)
-            follow = "You did not call a tool. Say you did not catch a request for the reading lamp. Do not claim the lamp changed."
-        text, samples = complete(model, processor, wav, True, reply, follow)
-        if samples is None or len(samples) == 0:
-            sys.exit("model returned no audio")
-        # The reply is not chunked: generate() returns the whole waveform, then playback starts.
-        play_or_save(samples)
-        if text:
-            print(text, flush=True)
-    finally:
-        if cleanup is not None:
-            cleanup.unlink(missing_ok=True)
+        while True:
+            captured = record_until_silence()
+            try:
+                one_turn(model, processor, captured)
+            finally:
+                captured.unlink(missing_ok=True)
+    except KeyboardInterrupt:
+        print("\nstopped", flush=True)
 
 if __name__ == "__main__":
     main()
