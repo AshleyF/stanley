@@ -16,7 +16,7 @@ SESSION = {
             "instructions": "Call set_lamp for the living-room reading lamp. on is required. A color turns the lamp on. Colors: purple, red, blue, green, warm white.",
             "tool_choice": "auto",
             "parallel_tool_calls": False,
-            "reasoning": {"effort": "minimal"},
+            "reasoning": {"effort": "none"},
             "tools": [{
                 "type": "function",
                 "name": "set_lamp",
@@ -166,6 +166,8 @@ async def main():
                     asyncio.create_task(finish_call(connection, item))
                 elif kind == "error":
                     print(f"\n{event}", flush=True)
+                    if getattr(getattr(event, "error", None), "client_event_id", None) == "start":
+                        break
                 elif kind == "session.closed":
                     break
         finally:
