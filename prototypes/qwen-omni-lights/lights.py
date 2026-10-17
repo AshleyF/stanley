@@ -9,20 +9,23 @@ from transformers import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcess
 MODEL_ID, HOST, RATE_OUT = "Qwen/Qwen2.5-Omni-3B", "192.168.4.38", 24000
 SYSTEM = "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."
 COLORS = {"purple": (280, 100, 100), "red": (0, 100, 100), "blue": (240, 100, 100), "green": (120, 100, 100), "warm white": (30, 20, 100)}
-TOOLS = "\n".join((
-    '{"name":"lights_on","description":"Turn the living-room reading lamp on. Optional color: purple, red, blue, green, or warm white. Setting a color also turns the lamp on.","parameters":{"type":"object","properties":{"color":{"type":"string"}}}}',
-    '{"name":"lights_off","description":"Turn the living-room reading lamp off.","parameters":{"type":"object","properties":{}}}',
-    '{"name":"set_light_color","description":"Set the living-room reading lamp color and turn it on. Colors: purple, red, blue, green, warm white.","parameters":{"type":"object","properties":{"color":{"type":"string"}},"required":["color"]}}',
-))
-PROMPT = (
-    "The attached audio is a person talking to the house.\nThe only lamp is the living-room reading lamp.\n"
-    "You may call one or more functions to assist with the user query.\n"
-    "You are provided with function signatures within <tools></tools> XML tags:\n"
-    f"<tools>\n{TOOLS}\n</tools>\n"
-    "For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n"
-    '<tool_call>\n{"name": <function-name>, "arguments": <args-json-object>}\n</tool_call>\n'
-    "Call only those tools. Do not describe the call in any other format."
+COLOR_SCHEMA = {"type": "string", "enum": ["purple", "red", "blue", "green", "warm white"]}
+TOOLS = (
+    {"type": "function", "function": {"name": "lights_on", "description": "Turn the living-room reading lamp on.", "parameters": {"type": "object", "properties": {"color": COLOR_SCHEMA}}}},
+    {"type": "function", "function": {"name": "lights_off", "description": "Turn the living-room reading lamp off.", "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "set_light_color", "description": "Set the living-room reading lamp color and turn it on.", "parameters": {"type": "object", "properties": {"color": COLOR_SCHEMA}, "required": ["color"]}}},
 )
+
+def tool_block():
+    """This checkpoint's chat template has no tools argument. Qwen's trained registration is this system text."""
+    body = "\n".join(json.dumps(tool, separators=(",", ":")) for tool in TOOLS)
+    return (
+        "# Tools\n\nYou may call one or more functions to assist with the user query.\n\n"
+        "You are provided with function signatures within <tools></tools> XML tags:\n"
+        f"<tools>\n{body}\n</tools>\n\n"
+        "For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n"
+        '<tool_call>\n{"name": <function-name>, "arguments": <args-json-object>}\n</tool_call>'
+    )
 
 def color_name(value):
     text = " ".join(str(value).split()).lower()
@@ -119,8 +122,10 @@ def load_wav(path):
     return np.ascontiguousarray(data, dtype=np.float32)
 
 def complete(model, processor, wav, speak, earlier=None, extra=None):
-    user = [{"type": "text", "text": PROMPT}, {"type": "audio", "audio": load_wav(wav)}]
-    messages = [{"role": "system", "content": [{"type": "text", "text": SYSTEM}]}, {"role": "user", "content": user}]
+    # Speech requires the exact system sentence. Tool schemas are registered on the text pass only.
+    system = SYSTEM if speak else f"{SYSTEM}\n\n{tool_block()}"
+    user = [{"type": "audio", "audio": load_wav(wav)}]
+    messages = [{"role": "system", "content": [{"type": "text", "text": system}]}, {"role": "user", "content": user}]
     if earlier:
         messages.append({"role": "assistant", "content": [{"type": "text", "text": earlier}]})
     if extra:
@@ -208,11 +213,11 @@ def main():
         calls = tool_calls(reply)
         if calls:
             results = [{"name": name, "result": run_tool(name, args)} for name, args in calls]
-            note = "Speak one short sentence confirming the reading lamp. If a result has an error, say it could not be reached. Do not call a tool."
+            follow = "<tool_response>\n" + json.dumps(results) + "\n</tool_response>\nSpeak one short sentence confirming the reading lamp. If a result has an error, say it could not be reached."
         else:
             print("no tool call", flush=True)
-            results, note = [], "You did not call a tool. Say you did not catch a request for the reading lamp. Do not claim the lamp changed. Do not call a tool."
-        text, samples = complete(model, processor, wav, True, reply, "Tool results:\n" + json.dumps(results) + "\n" + note)
+            follow = "You did not call a tool. Say you did not catch a request for the reading lamp. Do not claim the lamp changed."
+        text, samples = complete(model, processor, wav, True, reply, follow)
         if samples is None or len(samples) == 0:
             sys.exit("model returned no audio")
         # The reply is not chunked: generate() returns the whole waveform, then playback starts.

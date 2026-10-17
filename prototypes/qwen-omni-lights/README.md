@@ -23,6 +23,6 @@ pip install torch==2.14.1+cpu torchvision==0.29.1+cpu --index-url https://downlo
 pip install -r requirements.txt
 ```
 
-Tools are `lights_on`, `lights_off`, and `set_light_color`. A color prints `lights on, purple` (or red, blue, green, warm white). Off prints `lights off`. If the bulb cannot be reached, the error is printed and the spoken reply still runs.
+`lights_on`, `lights_off`, and `set_light_color` are registered as tool schemas on the text pass. The microphone turn is only the audio. This checkpoint's chat template has no `tools` argument, so the schema is appended to the system message in Qwen's tool format, and the script intercepts `<tool_call>`. A color prints `lights on, purple` (or red, blue, green, warm white). Off prints `lights off`. If the bulb cannot be reached, the error is printed and the spoken reply still runs.
 
 The weights are about 12 GB. Qwen's published BF16 floor for this checkpoint is about 18 GB. Attention uses PyTorch SDPA, not flash-attn.
