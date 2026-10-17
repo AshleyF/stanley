@@ -36,10 +36,11 @@ def reported(exc):
     return {"error": text}
 
 async def drive(action, color=None):
-    from kasa import DeviceConfig, Module, SmartBulb
+    from kasa import DeviceConfig, Module
+    from kasa.iot import IotBulb
     bulb = None
     try:
-        bulb = SmartBulb(HOST, config=DeviceConfig(host=HOST, timeout=5))
+        bulb = IotBulb(HOST, config=DeviceConfig(host=HOST, timeout=5))
         await bulb.update()
         if action == "off":
             await bulb.turn_off()
@@ -78,13 +79,16 @@ def run_tool(name, args):
         return reported(exc)
 
 def tool_calls(text):
-    """Scan for JSON objects. The model sometimes repeats the opening tool_call tag."""
-    decoder, calls, index = json.JSONDecoder(), [], 0
-    while (start := text.find("{", index)) >= 0:
+    """JSON inside tool_call tags only. An example in prose must not move the lamp."""
+    decoder, calls = json.JSONDecoder(), []
+    for chunk in text.split("<tool_call>")[1:]:
+        body = chunk.split("</tool_call>", 1)[0]
+        start = body.find("{")
+        if start < 0:
+            continue
         try:
-            obj, index = decoder.raw_decode(text, start)
+            obj, _ = decoder.raw_decode(body, start)
         except json.JSONDecodeError:
-            index = start + 1
             continue
         raw = (obj.get("arguments") or {}) if isinstance(obj, dict) else None
         if isinstance(raw, str):
@@ -193,14 +197,21 @@ def main():
     model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
         MODEL_ID, torch_dtype=torch.bfloat16, device_map="cpu", attn_implementation="sdpa").eval()
     processor = Qwen2_5OmniProcessor.from_pretrained(MODEL_ID)
+    for key in ("temperature", "top_p", "top_k"):
+        setattr(model.generation_config, key, None)
     try:
         if wav is None:
             wav = cleanup = record_until_silence()
         print("Generation started.", flush=True)
         reply, _ = complete(model, processor, wav, speak=False)
         print(f"model: {reply}", flush=True)
-        results = [{"name": name, "result": run_tool(name, args)} for name, args in tool_calls(reply)]
-        note = "Speak one short sentence confirming the reading lamp. If a result has an error, say it could not be reached. Do not call a tool."
+        calls = tool_calls(reply)
+        if calls:
+            results = [{"name": name, "result": run_tool(name, args)} for name, args in calls]
+            note = "Speak one short sentence confirming the reading lamp. If a result has an error, say it could not be reached. Do not call a tool."
+        else:
+            print("no tool call", flush=True)
+            results, note = [], "You did not call a tool. Say you did not catch a request for the reading lamp. Do not claim the lamp changed. Do not call a tool."
         text, samples = complete(model, processor, wav, True, reply, "Tool results:\n" + json.dumps(results) + "\n" + note)
         if samples is None or len(samples) == 0:
             sys.exit("model returned no audio")
