@@ -2,7 +2,7 @@
 
 Speech in, speech out, and the living-room reading bulb. The model is `Qwen/Qwen2.5-Omni-3B`, the smallest official Qwen Omni checkpoint that hears speech and speaks back. The newer local Qwen3-Omni checkpoint is `Qwen/Qwen3-Omni-30B-A3B-Instruct`, which is a larger mixture-of-experts model, so this prototype stays on the 3B.
 
-The bulb is a Kasa SmartBulb at `192.168.4.204` on the house LAN. On, off, and color. A color turns it on and sets HSV. Names are purple, red, blue, green, and warm white. `python-kasa` is the client.
+The bulb is a Kasa SmartBulb at `192.168.4.38` on the house LAN. On, off, and color. A color turns it on and sets HSV. Names are purple, red, blue, green, and warm white. `python-kasa` is the client.
 
 On a Mac, create a new Python 3.12 environment. Install torch and torchvision from PyPI so the build includes MPS, then the rest of the pins, including python-kasa.
 

@@ -1,4 +1,4 @@
-"""Speech in, speech out, for the living-room reading bulb at 192.168.4.204."""
+"""Speech in, speech out, for the living-room reading bulb at 192.168.4.38."""
 
 import argparse, asyncio, contextlib, json, sys, tempfile
 from pathlib import Path
@@ -6,7 +6,7 @@ from pathlib import Path
 import torch
 from transformers import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcessor
 
-MODEL_ID, HOST, RATE_OUT = "Qwen/Qwen2.5-Omni-3B", "192.168.4.204", 24000
+MODEL_ID, HOST, RATE_OUT = "Qwen/Qwen2.5-Omni-3B", "192.168.4.38", 24000
 SYSTEM = "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."
 COLORS = {"purple": (280, 100, 100), "red": (0, 100, 100), "blue": (240, 100, 100), "green": (120, 100, 100), "warm white": (30, 20, 100)}
 TOOLS = "\n".join((
