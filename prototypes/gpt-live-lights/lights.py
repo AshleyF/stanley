@@ -1,6 +1,6 @@
 """One realtime session for the reading lamp at 192.168.4.38."""
 
-import asyncio, base64, contextlib, json, os, signal, sys, threading
+import asyncio, base64, contextlib, json, os, signal, sys, threading, time
 from pathlib import Path
 
 HOST, RATE = "192.168.4.38", 24000
@@ -17,7 +17,10 @@ SESSION = {
     ),
     "tool_choice": "auto",
     "audio": {
-        "input": {"format": {"type": "audio/pcm", "rate": RATE}},
+        "input": {
+            "format": {"type": "audio/pcm", "rate": RATE},
+            "turn_detection": {"type": "server_vad", "create_response": True, "interrupt_response": False},
+        },
         "output": {"format": {"type": "audio/pcm", "rate": RATE}, "voice": "marin"},
     },
     "tools": [
@@ -98,7 +101,7 @@ async def drive(on, hue=None, saturation=None, brightness=None):
 class Speaker:
     def __init__(self):
         import numpy as np, sounddevice as sd
-        self.np, self.buf, self.lock = np, bytearray(), threading.Lock()
+        self.np, self.buf, self.lock, self.until = np, bytearray(), threading.Lock(), 0.0
         self.stream = sd.OutputStream(samplerate=RATE, channels=1, dtype="int16", callback=self.play, blocksize=RATE // 50)
         self.stream.start()
 
@@ -112,16 +115,24 @@ class Speaker:
     def write(self, pcm):
         with self.lock:
             self.buf += pcm
+            now = time.monotonic()
+            start = self.until if self.until > now else now
+            self.until = start + len(pcm) / (RATE * 2) + 0.35
+
+    def playing(self):
+        with self.lock:
+            return time.monotonic() < self.until
 
     def clear(self):
         with self.lock:
             self.buf.clear()
+            self.until = 0.0
 
     def close(self):
         self.stream.stop()
         self.stream.close()
 
-async def send_mic(connection):
+async def send_mic(connection, speaker):
     import sounddevice as sd
     loop, queue = asyncio.get_running_loop(), asyncio.Queue()
 
@@ -131,6 +142,8 @@ async def send_mic(connection):
     with sd.InputStream(samplerate=RATE, channels=1, dtype="int16", callback=heard, blocksize=RATE // 50):
         while True:
             chunk = await queue.get()
+            if speaker.playing():
+                continue
             await connection.input_audio_buffer.append(audio=base64.b64encode(chunk).decode("ascii"))
 
 async def finish_call(connection, speaker, state, name, call_id, arguments):
@@ -141,9 +154,6 @@ async def finish_call(connection, speaker, state, name, call_id, arguments):
     if name == "wait_for_user":
         state["quiet"] = True
         speaker.clear()
-        with contextlib.suppress(Exception):
-            await connection.response.cancel()
-            await connection.output_audio_buffer.clear()
         result = {"wait": True}
         print("\nignored", flush=True)
     else:
@@ -178,7 +188,7 @@ async def main():
                 if kind == "session.updated":
                     print(f"session {getattr(event.session, 'id', 'ready')}. Ctrl-C stops.", flush=True)
                     if mic is None:
-                        mic = asyncio.create_task(send_mic(connection))
+                        mic = asyncio.create_task(send_mic(connection, speaker))
                 elif kind == "input_audio_buffer.speech_started":
                     state["quiet"] = False
                 elif kind == "response.output_audio.delta" and not state["quiet"]:
