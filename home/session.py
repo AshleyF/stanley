@@ -12,8 +12,15 @@ from .transcript import Log
 
 RATE = 24000
 REALTIME_MODEL = "gpt-realtime-2.1-mini"
-IDLE, FRAME = 12.0, RATE // 50
+IDLE, FRAME = 20.0, RATE // 50
 DISMISS = ("shut up", "goodbye", "good bye", "stop talking", "be quiet", "go away")
+DONE_WORDS = {
+    "okay", "ok", "great", "good", "thanks", "thank", "you", "yeah", "yes",
+    "alright", "all", "right", "stanley", "stan", "done", "that's", "thats",
+    "we're", "were", "we", "are", "i'm", "im", "sounds", "perfect", "cool",
+    "bye", "that", "is", "so", "much", "very",
+}
+DONE_MARK = {"thanks", "thank", "done", "goodbye", "bye"}
 WAKE_RATE = 16000
 MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
 CONFIRM = {
@@ -107,7 +114,7 @@ def realtime_session(home, tools, reminder=None, memory=""):
         parts.append("If the audio is a television, other people, or anything not said to you and not a follow-up, call not_for_me and say nothing.")
     parts.extend([
         "Answer a question to you in one or two sentences.",
-        "Call end_session when they say goodbye, see you later, okay thanks, shut up, stop talking, be quiet, go away, or that they are done.",
+        "Call end_session when they are done: goodbye, see you, okay thanks, great thanks, thank you, okay good, shut up, stop talking, be quiet, go away.",
         "Say nothing when you call not_for_me or end_session.",
     ])
     instructions = "\n".join(parts)
@@ -116,7 +123,7 @@ def realtime_session(home, tools, reminder=None, memory=""):
         {
             "type": "function",
             "name": "end_session",
-            "description": "The person is done or wants you to stop talking. Goodbye, see you later, okay thanks, shut up, stop talking, be quiet, go away.",
+            "description": "The person is done. Goodbye, see you, okay thanks, great thanks, thank you, okay good, shut up, stop talking, be quiet, go away.",
             "parameters": {"type": "object", "properties": {}},
         },
         {
@@ -309,8 +316,24 @@ async def request_reply(connection, state):
             return
     await connection.response.create(response=CONFIRM)
 
-def dismissal(text):
-    return next((phrase for phrase in DISMISS if phrase in text), None)
+def dismissal(text, final=False):
+    folded = " ".join(text.casefold().split())
+    if not folded:
+        return None
+    hard = next((phrase for phrase in DISMISS if phrase in folded), None)
+    if hard:
+        return hard
+    words = folded.split()
+    if not final or not words or len(words) > 8:
+        return None
+    if any(word not in DONE_WORDS for word in words):
+        return None
+    if len(words) == 1 and words[0] not in DONE_MARK:
+        return None
+    closing = any(word in DONE_MARK for word in words) or (
+        "good" in words and any(word in {"okay", "ok", "great", "sounds", "all"} for word in words)
+    )
+    return "done" if closing else None
 
 async def watch_dismiss(ear, speaker, connection, state, model):
     from vosk import KaldiRecognizer
@@ -327,7 +350,7 @@ async def watch_dismiss(ear, speaker, connection, state, model):
         pending = b""
         payload = recognizer.Result() if heard else recognizer.PartialResult()
         text = json.loads(payload).get("text" if heard else "partial", "")
-        phrase = dismissal(text)
+        phrase = dismissal(text, final=bool(heard))
         if phrase is None:
             continue
         state["stop"] = phrase
@@ -338,7 +361,7 @@ async def watch_dismiss(ear, speaker, connection, state, model):
 async def watch_idle(connection, speaker, state):
     while not state["stop"]:
         await asyncio.sleep(0.5)
-        if state["busy"] or speaker.playing():
+        if state["busy"] or state.get("responding") or speaker.playing():
             state["last_engage"] = time.monotonic()
         elif time.monotonic() - state["last_engage"] > IDLE:
             state["stop"] = "idle"
@@ -388,7 +411,7 @@ async def watch_due(connection, state, book):
         await speak(connection, state, announce_text(due))
 
 def heard_back(reason):
-    return reason == "goodbye" or reason in DISMISS
+    return reason == "goodbye" or reason == "done" or reason in DISMISS
 
 def remember(log, who, text):
     log.add(who, text)
@@ -431,12 +454,14 @@ async def run_session(client, ear, speaker, started, current, model, home, tools
                         continue
                     state["quiet"] = False
                     state["drop_audio"] = True
+                    state["last_engage"] = time.monotonic()
                     speaker.clear()
                 elif kind == "response.created":
                     if state["line"] and not state["logged_line"]:
                         remember(log, "assistant", state["line"])
                     state["line"], state["logged_line"] = "", False
                     state["responding"] = True
+                    state["last_engage"] = time.monotonic()
                     state["drop_audio"] = False
                     state["got_audio"] = False
                     state["reminder_text"] = None
