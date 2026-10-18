@@ -28,7 +28,7 @@ SESSION = {
     "audio": {
         "input": {
             "format": {"type": "audio/pcm", "rate": RATE},
-            "turn_detection": {"type": "server_vad", "create_response": True, "interrupt_response": False},
+            "turn_detection": {"type": "server_vad", "create_response": True, "interrupt_response": True},
         },
         "output": {"format": {"type": "audio/pcm", "rate": RATE}, "voice": "marin"},
     },
@@ -198,14 +198,12 @@ class Speaker:
             del self.buf[:need]
         outdata[:] = self.np.frombuffer(chunk.ljust(need, b"\x00"), dtype="int16").reshape(-1, 1)
 
-    def write(self, pcm, mute=0.35):
+    def write(self, pcm):
         with self.lock:
             self.buf += pcm
-            if mute is None:
-                return
             now = time.monotonic()
             start = self.until if self.until > now else now
-            self.until = start + len(pcm) / (RATE * 2) + mute
+            self.until = start + len(pcm) / (RATE * 2)
 
     def playing(self):
         with self.lock:
@@ -239,8 +237,7 @@ class Ear:
             self.loop.call_soon_threadsafe(self.wake.put_nowait, pcm)
         else:
             self.loop.call_soon_threadsafe(self.dismiss.put_nowait, pcm)
-            if not self.speaker.playing():
-                self.loop.call_soon_threadsafe(self.live.put_nowait, pcm)
+            self.loop.call_soon_threadsafe(self.live.put_nowait, pcm)
 
     def engage(self):
         with self.lock:
@@ -316,10 +313,19 @@ async def finish_call(connection, speaker, state, name, call_id, arguments):
     if name == "end_session":
         await connection.close()
     elif name != "not_for_me":
-        await connection.response.create(response={
-            "tool_choice": "none",
-            "instructions": "One short sentence confirming the lamp. Do not call a tool.",
-        })
+        await request_reply(connection, state)
+
+CONFIRM = {
+    "tool_choice": "none",
+    "instructions": "One short sentence confirming the lamp. Do not call a tool.",
+}
+
+async def request_reply(connection, state):
+    async with state["lock"]:
+        if state["responding"]:
+            state["confirm"] = True
+            return
+    await connection.response.create(response=CONFIRM)
 
 def dismissal(text):
     return next((phrase for phrase in DISMISS if phrase in text), None)
@@ -358,7 +364,11 @@ async def watch_idle(connection, speaker, state):
             return
 
 async def session(client, ear, speaker, started, current, model):
-    who, seen, state = None, set(), {"quiet": False, "busy": False, "stop": None, "last_engage": time.monotonic()}
+    who, seen = None, set()
+    state = {
+        "quiet": False, "busy": False, "stop": None, "responding": False, "confirm": False,
+        "drop_audio": False, "last_engage": time.monotonic(), "lock": asyncio.Lock(),
+    }
     mic = watch = dismiss = None
     async with client.realtime.connect(model="gpt-realtime-2.1", max_retries=0) as connection:
         current["connection"] = connection
@@ -374,7 +384,19 @@ async def session(client, ear, speaker, started, current, model):
                     watch = asyncio.create_task(watch_idle(connection, speaker, state))
                 elif kind == "input_audio_buffer.speech_started":
                     state["quiet"] = False
-                elif kind == "response.output_audio.delta" and not state["quiet"]:
+                    state["drop_audio"] = True
+                    speaker.clear()
+                elif kind == "response.created":
+                    state["responding"] = True
+                    state["drop_audio"] = False
+                elif kind in ("response.done", "response.cancelled"):
+                    async with state["lock"]:
+                        state["responding"] = False
+                        confirm = state["confirm"]
+                        state["confirm"] = False
+                    if confirm and not state["stop"]:
+                        await connection.response.create(response=CONFIRM)
+                elif kind == "response.output_audio.delta" and not state["quiet"] and not state["drop_audio"]:
                     state["last_engage"] = time.monotonic()
                     speaker.write(base64.b64decode(event.delta))
                 elif kind == "response.output_audio_transcript.delta" and event.delta and not state["quiet"]:
@@ -386,6 +408,12 @@ async def session(client, ear, speaker, started, current, model):
                     seen.add(event.call_id)
                     asyncio.create_task(finish_call(connection, speaker, state, event.name, event.call_id, event.arguments))
                 elif kind == "error":
+                    message = getattr(getattr(event, "error", None), "message", "") or ""
+                    if "active response in progress" in message:
+                        async with state["lock"]:
+                            state["responding"] = True
+                            state["confirm"] = True
+                        continue
                     print(f"\n{event}", flush=True)
                     if getattr(getattr(event, "error", None), "client_event_id", None) == "start":
                         state["stop"] = "error"
@@ -424,7 +452,7 @@ async def main():
                 started = time.monotonic()
                 audio = ear.engage()
                 status("heard Stanley")
-                speaker.write(bloop(True), mute=None)
+                speaker.write(bloop(True))
                 status(f"opening session, {len(audio) / (RATE * 2):.1f}s buffered")
                 try:
                     reason = await session(client, ear, speaker, started, current, model)
@@ -433,7 +461,7 @@ async def main():
                 if shutdown.is_set():
                     break
                 status(f"disengaged ({reason})")
-                speaker.write(bloop(False), mute=None)
+                speaker.write(bloop(False))
                 await asyncio.sleep(0.5)
                 ear.idle()
     finally:
