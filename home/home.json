@@ -1,0 +1,72 @@
+{
+  "agent": {
+    "name": "Stanley",
+    "wake": "Stanley",
+    "wake_aliases": ["stanley", "stan"],
+    "voice": "cedar",
+    "buffer_seconds": 180
+  },
+  "lights": [
+    {
+      "name": "Black Reading Lamp",
+      "host": "192.168.4.38",
+      "description": "The black reading lamp in the bed room."
+    },
+    {
+      "name": "Red Den Light",
+      "host": "192.168.4.136",
+      "description": "The red lamp in the den."
+    },
+    {
+      "name": "Bedroom Light",
+      "host": "192.168.4.75",
+      "description": "The bedroom floor lamp light."
+    },
+    {
+      "name": "Soaking (Sink Left)",
+      "host": "192.168.4.119",
+      "description": "Soaking room, the light above the sink on the left."
+    },
+    {
+      "name": "Soaking (Sink Right)",
+      "host": "192.168.4.116",
+      "description": "Soaking room, the light above the sink on the right."
+    },
+    {
+      "name": "Soaking (Tub Left)",
+      "host": "192.168.4.118",
+      "description": "Soaking room, the light above the tub on the left."
+    },
+    {
+      "name": "Soaking (Tub Right)",
+      "host": "192.168.4.117",
+      "description": "Soaking room, the light above the tub on the right."
+    },
+    {
+      "name": "Patio",
+      "host": "192.168.4.71",
+      "description": "The downstairs patio light."
+    },
+    {
+      "name": "Shop Light",
+      "host": "192.168.4.43",
+      "description": "The shop light."
+    },
+    {
+      "name": "Garage Left",
+      "host": "192.168.4.73",
+      "description": "The light on the left of the garage."
+    },
+    {
+      "name": "Garage Right",
+      "host": "192.168.4.64",
+      "description": "The light on the right of the garage."
+    }
+  ],
+  "doors": [
+    {
+      "name": "Garage",
+      "description": "The garage door."
+    }
+  ]
+}

@@ -1,3 +1,7 @@
+# Moved
+
+The app is `home/`. `python lights.py` here still starts it. Edit `home/home.json`.
+
 # Wake word, then a realtime lamp session
 
 Sits on the microphone for free. When it hears the wake word anywhere in the sentence, it opens one `gpt-realtime-2.1` session, sends the speech it already buffered (so "turn off the lights, Stanley" still includes the request), then keeps the mic live.
