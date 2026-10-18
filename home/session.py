@@ -1,4 +1,4 @@
-"""Wake word, then one realtime session. Device work lives in home.tools."""
+"""Wake word, then one realtime session. A due reminder can open one too."""
 
 import asyncio, base64, json, signal, threading, time, zipfile
 from collections import deque
@@ -7,6 +7,7 @@ from urllib.request import urlretrieve
 
 from .config import ROOT, load_env, load_home
 from .tools import find_tool, load_tools
+from .tools.timers import kickoff
 
 RATE = 24000
 REALTIME_MODEL = "gpt-realtime-2.1-mini"
@@ -89,14 +90,18 @@ def bloop(rising):
 
     return note(low) + bytes(int(RATE * 2 * 0.04)) + note(high)
 
-def realtime_session(home, tools):
+def realtime_session(home, tools, reminder=None):
     name = home["name"]
     abilities = [tool.instructions(home) for tool in tools]
     abilities = [text for text in abilities if text]
+    if reminder:
+        opener = "A reminder is due, so you speak first. They did not just say your name.\n" + kickoff(reminder)
+    else:
+        opener = "The session started because they said your name. A follow-up, such as 'no, purple' or another question, is still for you."
     instructions = "\n".join([
         f"You are {name}. You can answer when someone is talking to you.",
         *abilities,
-        "The session started because they said your name. A follow-up, such as 'no, purple' or another question, is still for you.",
+        opener,
         "Answer a question to you in one or two sentences.",
         f"If the audio is a television, other people, or anything not said to you and not a follow-up, call not_for_me and say nothing.",
         "Call end_session when they say goodbye, see you later, okay thanks, shut up, stop talking, be quiet, go away, or that they are done.",
@@ -188,11 +193,11 @@ class Ear:
             self.loop.call_soon_threadsafe(self.dismiss.put_nowait, pcm)
             self.loop.call_soon_threadsafe(self.live.put_nowait, pcm)
 
-    def engage(self):
+    def engage(self, keep=True):
         with self.lock:
             frames = list(self.ring)
             self.mode = "session"
-        self.backlog = utterance(frames)
+        self.backlog = utterance(frames) if keep else b""
         return self.backlog
 
     def idle(self):
@@ -207,9 +212,11 @@ class Ear:
         self.stream.stop()
         self.stream.close()
 
-async def wait_for_wake(ear, recognizer, shutdown, home):
+async def wait_for_wake(ear, recognizer, shutdown, home, book):
     pending = b""
     while not shutdown.is_set():
+        if book.due():
+            return "timer"
         try:
             pcm = await asyncio.wait_for(ear.wake.get(), 0.2)
         except asyncio.TimeoutError:
@@ -222,7 +229,8 @@ async def wait_for_wake(ear, recognizer, shutdown, home):
         payload = recognizer.Result() if heard else recognizer.PartialResult()
         text = json.loads(payload).get("text" if heard else "partial", "")
         if woke(text, home):
-            return
+            return "wake"
+    return None
 
 async def send_audio(connection, ear):
     audio = ear.backlog
@@ -247,6 +255,9 @@ async def finish_call(connection, speaker, state, name, call_id, arguments):
     elif name == "end_session":
         result = {"ended": True}
         state["stop"] = "goodbye"
+    elif name in ("retry_in", "acknowledge"):
+        tool = find_tool(state["tools"], name)
+        result = await tool.call(name, args, state["home"]) if tool else {"error": f"unknown tool {name}"}
     else:
         tool = find_tool(state["tools"], name)
         state["quiet"] = False
@@ -266,7 +277,7 @@ async def finish_call(connection, speaker, state, name, call_id, arguments):
     })
     if name == "end_session":
         await connection.close()
-    elif name != "not_for_me":
+    elif name not in ("not_for_me", "retry_in", "acknowledge"):
         await request_reply(connection, state)
 
 async def request_reply(connection, state):
@@ -312,26 +323,50 @@ async def watch_idle(connection, speaker, state):
             await connection.close()
             return
 
-async def run_session(client, ear, speaker, started, current, model, home, tools):
+async def speak(connection, state, instructions):
+    async with state["lock"]:
+        if state["responding"]:
+            state["later"] = instructions
+            return
+    state["reminder_text"] = instructions
+    await connection.response.create(response={"instructions": instructions})
+
+async def watch_due(connection, state, book):
+    while not state["stop"]:
+        await asyncio.sleep(0.5)
+        due = book.claim_due()
+        if not due:
+            continue
+        names = ", ".join(timer["what"] for timer in due)
+        status(f"reminder due: {names}")
+        await speak(connection, state, kickoff(due))
+
+def heard_back(reason):
+    return reason == "goodbye" or reason in DISMISS
+
+async def run_session(client, ear, speaker, started, current, model, home, tools, book, reminder=None):
     who, seen = None, set()
     state = {
         "quiet": False, "busy": False, "stop": None, "responding": False, "confirm": False,
         "drop_audio": False, "last_engage": time.monotonic(), "lock": asyncio.Lock(),
-        "home": home, "tools": tools,
+        "home": home, "tools": tools, "later": None, "reminder_text": None,
     }
-    mic = watch = dismiss = None
+    mic = watch = dismiss = due = None
     async with client.realtime.connect(model=REALTIME_MODEL, max_retries=0) as connection:
         current["connection"] = connection
         dismiss = asyncio.create_task(watch_dismiss(ear, speaker, connection, state, model))
-        await connection.session.update(session=realtime_session(home, tools), event_id="start")
+        await connection.session.update(session=realtime_session(home, tools, reminder), event_id="start")
         try:
             async for event in connection:
                 kind = event.type
                 if kind == "session.updated" and mic is None:
                     state["last_engage"] = time.monotonic()
                     status(f"engaged, session ready in {time.monotonic() - started:.1f}s, {getattr(event.session, 'id', 'ready')}")
+                    if reminder:
+                        await speak(connection, state, kickoff(reminder))
                     mic = asyncio.create_task(send_audio(connection, ear))
                     watch = asyncio.create_task(watch_idle(connection, speaker, state))
+                    due = asyncio.create_task(watch_due(connection, state, book))
                 elif kind == "input_audio_buffer.speech_started":
                     state["quiet"] = False
                     state["drop_audio"] = True
@@ -339,12 +374,19 @@ async def run_session(client, ear, speaker, started, current, model, home, tools
                 elif kind == "response.created":
                     state["responding"] = True
                     state["drop_audio"] = False
+                    state["reminder_text"] = None
                 elif kind in ("response.done", "response.cancelled"):
                     async with state["lock"]:
                         state["responding"] = False
                         confirm = state["confirm"]
                         state["confirm"] = False
-                    if confirm and not state["stop"]:
+                        later = state["later"]
+                        state["later"] = None
+                    if state["stop"]:
+                        continue
+                    if later:
+                        await speak(connection, state, later)
+                    elif confirm:
                         await connection.response.create(response=CONFIRM)
                 elif kind == "response.output_audio.delta" and not state["quiet"] and not state["drop_audio"]:
                     state["last_engage"] = time.monotonic()
@@ -362,7 +404,10 @@ async def run_session(client, ear, speaker, started, current, model, home, tools
                     if "active response in progress" in message:
                         async with state["lock"]:
                             state["responding"] = True
-                            state["confirm"] = True
+                            if state["reminder_text"]:
+                                state["later"] = state["reminder_text"]
+                            else:
+                                state["confirm"] = True
                         continue
                     print(f"\n{event}", flush=True)
                     if getattr(getattr(event, "error", None), "client_event_id", None) == "start":
@@ -370,7 +415,7 @@ async def run_session(client, ear, speaker, started, current, model, home, tools
                         break
         finally:
             current["connection"] = None
-            for task in (mic, watch, dismiss):
+            for task in (mic, watch, dismiss, due):
                 if task is not None:
                     task.cancel()
     return state["stop"] or "closed"
@@ -380,6 +425,7 @@ async def main():
     from vosk import KaldiRecognizer, Model
     load_env()
     home, tools = load_home(), load_tools()
+    book = find_tool(tools, "set_timer").book
     model = Model(str(wake_model()))
     loop, shutdown, current = asyncio.get_running_loop(), asyncio.Event(), {"connection": None}
     speaker, ear = Speaker(), None
@@ -395,20 +441,37 @@ async def main():
     try:
         async with AsyncOpenAI() as client:
             while not shutdown.is_set():
-                status(f"listening for {home['wake']}")
+                status(f"listening for {home['wake']}{book.next_phrase()}")
                 recognizer = KaldiRecognizer(model, WAKE_RATE)
-                await wait_for_wake(ear, recognizer, shutdown, home)
-                if shutdown.is_set():
+                kind = await wait_for_wake(ear, recognizer, shutdown, home, book)
+                if shutdown.is_set() or kind is None:
                     break
                 started = time.monotonic()
-                audio = ear.engage()
-                status(f"heard {home['wake']}")
+                reminder = book.claim_due() if kind == "timer" else None
+                if kind == "timer" and not reminder:
+                    continue
+                audio = ear.engage(keep=kind != "timer")
+                if reminder:
+                    names = ", ".join(timer["what"] for timer in reminder)
+                    status(f"reminder due: {names}")
+                else:
+                    status(f"heard {home['wake']}")
                 speaker.write(bloop(True))
-                status(f"opening session, {len(audio) / (RATE * 2):.1f}s buffered")
+                if reminder:
+                    status("opening session for a reminder")
+                else:
+                    status(f"opening session, {len(audio) / (RATE * 2):.1f}s buffered")
                 try:
-                    reason = await run_session(client, ear, speaker, started, current, model, home, tools)
+                    reason = await run_session(
+                        client, ear, speaker, started, current, model, home, tools, book, reminder,
+                    )
                 except Exception as exc:
                     reason = str(exc).strip() or type(exc).__name__
+                if heard_back(reason):
+                    book.finish(list(book.session_ids))
+                else:
+                    book.fallback(list(book.session_ids))
+                book.session_ids.clear()
                 if shutdown.is_set():
                     break
                 status(f"disengaged ({reason})")
