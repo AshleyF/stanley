@@ -1,4 +1,4 @@
-"""Listen locally for Stanley, then open one realtime lamp session."""
+"""Listen locally for Stanley, then open one realtime session."""
 
 import asyncio, base64, contextlib, json, os, signal, sys, threading, time, zipfile
 from collections import deque
@@ -6,7 +6,7 @@ from pathlib import Path
 from urllib.request import urlretrieve
 
 HOST, RATE = "192.168.4.38", 24000
-BUFFER, QUIET, FRAME = 12.0, 10.0, RATE // 50
+BUFFER, IDLE, FRAME = 12.0, 12.0, RATE // 50
 WAKE_RATE = 16000
 MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
 SESSION = {
@@ -14,12 +14,14 @@ SESSION = {
     "model": "gpt-realtime-2.1",
     "output_modalities": ["audio"],
     "instructions": (
-        "You control only the living-room reading lamp. "
-        "Call set_lamp only when the person clearly asks to turn that lamp on or off or to change its color. "
+        "You are Stanley. You can change the living-room reading lamp, and you can answer when someone is talking to you. "
+        "Call set_lamp only when they clearly ask to turn that lamp on or off or to change its color. "
         "Choose hue from 0 to 360, saturation from 0 to 100, and brightness from 0 to 100. "
+        "The session started because they said your name. A follow-up, such as 'no, purple' or another question, is still for you. "
+        "Answer a question to you in one or two sentences. "
+        "If the audio is a television, other people, or anything not said to you and not a follow-up, call not_for_me and say nothing. "
         "Call end_session when they say goodbye, see you later, okay thanks, or that they are done. "
-        "If the audio is silence, noise, or about anything else, call wait_for_user. "
-        "Say nothing unless you changed the lamp."
+        "Say nothing when you call not_for_me or end_session."
     ),
     "tool_choice": "auto",
     "audio": {
@@ -53,8 +55,8 @@ SESSION = {
         },
         {
             "type": "function",
-            "name": "wait_for_user",
-            "description": "Call this when the audio does not ask to change the reading lamp. Ends the turn with no spoken reply.",
+            "name": "not_for_me",
+            "description": "The audio is not addressed to Stanley and is not a follow-up. Television, other people, or background. Say nothing.",
             "parameters": {"type": "object", "properties": {}},
         },
     ],
@@ -288,18 +290,21 @@ async def finish_call(connection, speaker, state, name, call_id, arguments):
         args = json.loads(arguments or "{}")
     except json.JSONDecodeError:
         args = {}
-    if name == "wait_for_user":
+    if name == "not_for_me":
         state["quiet"] = True
         speaker.clear()
-        result = {"wait": True}
-        print("\nignored", flush=True)
+        result = {"ignored": True}
+        print("\nnot for me", flush=True)
     elif name == "end_session":
         result = {"ended": True}
         state["stop"] = "goodbye"
     else:
         state["quiet"] = False
-        state["last_user"] = time.monotonic()
+        state["busy"] = True
+        state["last_engage"] = time.monotonic()
         result = await drive(bool(args.get("on")), args.get("hue"), args.get("saturation"), args.get("brightness"))
+        state["busy"] = False
+        state["last_engage"] = time.monotonic()
     await connection.conversation.item.create(item={
         "type": "function_call_output",
         "call_id": call_id,
@@ -307,24 +312,24 @@ async def finish_call(connection, speaker, state, name, call_id, arguments):
     })
     if name == "end_session":
         await connection.close()
-    elif name != "wait_for_user":
+    elif name != "not_for_me":
         await connection.response.create(response={
             "tool_choice": "none",
             "instructions": "One short sentence confirming the lamp. Do not call a tool.",
         })
 
-async def watch_quiet(connection, speaker, state):
+async def watch_idle(connection, speaker, state):
     while not state["stop"]:
         await asyncio.sleep(0.5)
-        if speaker.playing():
-            state["last_user"] = time.monotonic()
-        elif time.monotonic() - state["last_user"] > QUIET:
-            state["stop"] = "timeout"
+        if state["busy"] or speaker.playing():
+            state["last_engage"] = time.monotonic()
+        elif time.monotonic() - state["last_engage"] > IDLE:
+            state["stop"] = "idle"
             await connection.close()
             return
 
 async def session(client, ear, speaker, started, current):
-    who, seen, state = None, set(), {"quiet": False, "stop": None, "last_user": time.monotonic()}
+    who, seen, state = None, set(), {"quiet": False, "busy": False, "stop": None, "last_engage": time.monotonic()}
     mic = watch = None
     async with client.realtime.connect(model="gpt-realtime-2.1", max_retries=0) as connection:
         current["connection"] = connection
@@ -333,14 +338,14 @@ async def session(client, ear, speaker, started, current):
             async for event in connection:
                 kind = event.type
                 if kind == "session.updated" and mic is None:
-                    state["last_user"] = time.monotonic()
+                    state["last_engage"] = time.monotonic()
                     status(f"engaged, session ready in {time.monotonic() - started:.1f}s, {getattr(event.session, 'id', 'ready')}")
                     mic = asyncio.create_task(send_audio(connection, ear))
-                    watch = asyncio.create_task(watch_quiet(connection, speaker, state))
+                    watch = asyncio.create_task(watch_idle(connection, speaker, state))
                 elif kind == "input_audio_buffer.speech_started":
                     state["quiet"] = False
-                    state["last_user"] = time.monotonic()
                 elif kind == "response.output_audio.delta" and not state["quiet"]:
+                    state["last_engage"] = time.monotonic()
                     speaker.write(base64.b64decode(event.delta))
                 elif kind == "response.output_audio_transcript.delta" and event.delta and not state["quiet"]:
                     if who != "stanley":
