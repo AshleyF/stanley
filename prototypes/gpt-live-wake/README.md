@@ -13,4 +13,4 @@ cp .env.example .env
 python lights.py
 ```
 
-`home.json` is the configuration. `agent.name` is who it is, `agent.wake` is the word that opens a session, and `agent.voice` is the OpenAI voice. `lights` is each light's name, IP address, and where it is. That list is what it is told and what `set_light` accepts. Ctrl-C quits.
+`home.json` is the configuration. `agent.name` is who it is, `agent.wake` is the word that opens a session, `agent.voice` is the OpenAI voice, and `agent.buffer_seconds` is how much talk to keep before that word. `lights` is each light's name, IP address, and where it is. That list is what it is told and what `set_light` accepts. Ctrl-C quits.

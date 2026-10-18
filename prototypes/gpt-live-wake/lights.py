@@ -6,7 +6,7 @@ from pathlib import Path
 from urllib.request import urlretrieve
 
 RATE = 24000
-BUFFER, IDLE, FRAME = 12.0, 12.0, RATE // 50
+IDLE, FRAME = 12.0, RATE // 50
 DISMISS = ("shut up", "goodbye", "good bye", "stop talking", "be quiet", "go away")
 WAKE_RATE = 16000
 MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
@@ -22,12 +22,20 @@ def load_home():
     wake = str(agent.get("wake") or name).strip()
     voice = str(agent.get("voice") or "").strip()
     aliases = [str(item).strip() for item in (agent.get("wake_aliases") or []) if str(item).strip()]
+    try:
+        buffer_seconds = float(agent.get("buffer_seconds") or 180)
+    except (TypeError, ValueError):
+        buffer_seconds = 180
+    buffer_seconds = max(5.0, buffer_seconds)
     lights = [light for light in (data.get("lights") or []) if light.get("name") and light.get("host")]
     if not name or not wake or not voice:
         sys.exit(f"{path} needs agent.name, agent.wake, and agent.voice")
     if not lights:
         sys.exit(f"No lights in {path}")
-    return {"name": name, "wake": wake, "voice": voice, "aliases": aliases, "lights": lights}
+    return {
+        "name": name, "wake": wake, "voice": voice, "aliases": aliases,
+        "buffer_seconds": buffer_seconds, "lights": lights,
+    }
 
 def woke(text, home):
     heard = text.casefold().split()
@@ -163,30 +171,24 @@ def to_16k(pcm):
     return np.interp(grid, np.arange(len(samples)), samples).astype(np.int16).tobytes()
 
 def utterance(frames):
-    # The pause after the wake word is what lets the spotter finish it.
-    # Keep the speech before that pause, and drop only a long quiet stretch before the sentence.
+    # Keep every stretch of talk in the buffer, including across pauses.
+    # Drop the quiet, so a conversation can be caught up without uploading silence.
     if not frames:
         return b""
     levels = sorted(value for _pcm, value in frames)
     floor = levels[len(levels) // 5]
     cutoff = max(floor * 3, floor + 40)
     speech = [value >= cutoff for _pcm, value in frames]
-    hold, pad = int(1.5 * RATE / FRAME), int(0.2 * RATE / FRAME)
+    pad = int(0.15 * RATE / FRAME)
     if not any(speech):
-        return b"".join(pcm for pcm, _value in frames[-int(8 * RATE / FRAME):])
-    end = len(frames)
-    while end > 0 and not speech[end - 1]:
-        end -= 1
-    start, gap = end, 0
-    for index in range(end - 1, -1, -1):
-        if speech[index]:
-            start, gap = index, 0
-        else:
-            gap += 1
-            if gap >= hold:
-                break
-    start, end = max(0, start - pad), min(len(frames), end + pad)
-    return b"".join(pcm for pcm, _value in frames[start:end])
+        return b"".join(pcm for pcm, _value in frames[-int(20 * RATE / FRAME):])
+    keep = [False] * len(frames)
+    for index, talking in enumerate(speech):
+        if not talking:
+            continue
+        for nearby in range(max(0, index - pad), min(len(frames), index + pad + 1)):
+            keep[nearby] = True
+    return b"".join(pcm for (pcm, _value), wanted in zip(frames, keep) if wanted)
 
 def bloop(rising):
     import numpy as np
@@ -272,10 +274,10 @@ class Speaker:
         self.stream.close()
 
 class Ear:
-    def __init__(self, loop, speaker):
+    def __init__(self, loop, speaker, buffer_seconds):
         import sounddevice as sd
         self.loop, self.speaker = loop, speaker
-        self.ring, self.lock = deque(maxlen=int(BUFFER * RATE / FRAME)), threading.Lock()
+        self.ring, self.lock = deque(maxlen=int(buffer_seconds * RATE / FRAME)), threading.Lock()
         self.mode, self.backlog = "wake", b""
         self.wake, self.live, self.dismiss = asyncio.Queue(), asyncio.Queue(), asyncio.Queue()
         self.stream = sd.InputStream(samplerate=RATE, channels=1, dtype="int16", callback=self.heard, blocksize=FRAME)
@@ -495,7 +497,7 @@ async def main():
             asyncio.create_task(connection.close())
 
     loop.add_signal_handler(signal.SIGINT, stop)
-    ear = Ear(loop, speaker)
+    ear = Ear(loop, speaker, home["buffer_seconds"])
     try:
         async with AsyncOpenAI() as client:
             while not shutdown.is_set():
