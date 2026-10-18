@@ -7,6 +7,7 @@ from urllib.request import urlretrieve
 
 HOST, RATE = "192.168.4.38", 24000
 BUFFER, IDLE, FRAME = 12.0, 12.0, RATE // 50
+DISMISS = ("shut up", "goodbye", "good bye", "stop talking", "be quiet", "go away")
 WAKE_RATE = 16000
 MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
 SESSION = {
@@ -20,7 +21,7 @@ SESSION = {
         "The session started because they said your name. A follow-up, such as 'no, purple' or another question, is still for you. "
         "Answer a question to you in one or two sentences. "
         "If the audio is a television, other people, or anything not said to you and not a follow-up, call not_for_me and say nothing. "
-        "Call end_session when they say goodbye, see you later, okay thanks, or that they are done. "
+        "Call end_session when they say goodbye, see you later, okay thanks, shut up, stop talking, be quiet, go away, or that they are done. "
         "Say nothing when you call not_for_me or end_session."
     ),
     "tool_choice": "auto",
@@ -50,7 +51,7 @@ SESSION = {
         {
             "type": "function",
             "name": "end_session",
-            "description": "The person is done. Goodbye, see you later, okay thanks, that's all.",
+            "description": "The person is done or wants you to stop talking. Goodbye, see you later, okay thanks, shut up, stop talking, be quiet, go away.",
             "parameters": {"type": "object", "properties": {}},
         },
         {
@@ -225,7 +226,7 @@ class Ear:
         self.loop, self.speaker = loop, speaker
         self.ring, self.lock = deque(maxlen=int(BUFFER * RATE / FRAME)), threading.Lock()
         self.mode, self.backlog = "wake", b""
-        self.wake, self.live = asyncio.Queue(), asyncio.Queue()
+        self.wake, self.live, self.dismiss = asyncio.Queue(), asyncio.Queue(), asyncio.Queue()
         self.stream = sd.InputStream(samplerate=RATE, channels=1, dtype="int16", callback=self.heard, blocksize=FRAME)
         self.stream.start()
 
@@ -236,8 +237,10 @@ class Ear:
             mode = self.mode
         if mode == "wake":
             self.loop.call_soon_threadsafe(self.wake.put_nowait, pcm)
-        elif not self.speaker.playing():
-            self.loop.call_soon_threadsafe(self.live.put_nowait, pcm)
+        else:
+            self.loop.call_soon_threadsafe(self.dismiss.put_nowait, pcm)
+            if not self.speaker.playing():
+                self.loop.call_soon_threadsafe(self.live.put_nowait, pcm)
 
     def engage(self):
         with self.lock:
@@ -250,7 +253,7 @@ class Ear:
         with self.lock:
             self.mode = "wake"
             self.ring.clear()
-        for queue in (self.wake, self.live):
+        for queue in (self.wake, self.live, self.dismiss):
             while not queue.empty():
                 queue.get_nowait()
 
@@ -318,6 +321,32 @@ async def finish_call(connection, speaker, state, name, call_id, arguments):
             "instructions": "One short sentence confirming the lamp. Do not call a tool.",
         })
 
+def dismissal(text):
+    return next((phrase for phrase in DISMISS if phrase in text), None)
+
+async def watch_dismiss(ear, speaker, connection, state, model):
+    from vosk import KaldiRecognizer
+    recognizer, pending = KaldiRecognizer(model, WAKE_RATE), b""
+    while not state["stop"]:
+        try:
+            pcm = await asyncio.wait_for(ear.dismiss.get(), 0.2)
+        except asyncio.TimeoutError:
+            continue
+        pending += to_16k(pcm)
+        if len(pending) < WAKE_RATE * 2 // 5:
+            continue
+        heard = recognizer.AcceptWaveform(pending)
+        pending = b""
+        payload = recognizer.Result() if heard else recognizer.PartialResult()
+        text = json.loads(payload).get("text" if heard else "partial", "")
+        phrase = dismissal(text)
+        if phrase is None:
+            continue
+        state["stop"] = phrase
+        speaker.clear()
+        await connection.close()
+        return
+
 async def watch_idle(connection, speaker, state):
     while not state["stop"]:
         await asyncio.sleep(0.5)
@@ -328,11 +357,12 @@ async def watch_idle(connection, speaker, state):
             await connection.close()
             return
 
-async def session(client, ear, speaker, started, current):
+async def session(client, ear, speaker, started, current, model):
     who, seen, state = None, set(), {"quiet": False, "busy": False, "stop": None, "last_engage": time.monotonic()}
-    mic = watch = None
+    mic = watch = dismiss = None
     async with client.realtime.connect(model="gpt-realtime-2.1", max_retries=0) as connection:
         current["connection"] = connection
+        dismiss = asyncio.create_task(watch_dismiss(ear, speaker, connection, state, model))
         await connection.session.update(session=SESSION, event_id="start")
         try:
             async for event in connection:
@@ -362,7 +392,7 @@ async def session(client, ear, speaker, started, current):
                         break
         finally:
             current["connection"] = None
-            for task in (mic, watch):
+            for task in (mic, watch, dismiss):
                 if task is not None:
                     task.cancel()
     return state["stop"] or "closed"
@@ -397,7 +427,7 @@ async def main():
                 speaker.write(bloop(True), mute=None)
                 status(f"opening session, {len(audio) / (RATE * 2):.1f}s buffered")
                 try:
-                    reason = await session(client, ear, speaker, started, current)
+                    reason = await session(client, ear, speaker, started, current, model)
                 except Exception as exc:
                     reason = str(exc).strip() or type(exc).__name__
                 if shutdown.is_set():
