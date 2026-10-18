@@ -37,19 +37,23 @@ def nag_seconds(original_seconds, attempts):
 def clock(when):
     return time.strftime("%I:%M %p", time.localtime(when)).lstrip("0")
 
+def spoken_line(timers):
+    bits = []
+    for timer in timers:
+        what = (timer.get("what") or "").strip()
+        if len(what) > 1 and what[0].isupper() and what[1].islower():
+            what = what[0].lower() + what[1:]
+        if what:
+            bits.append(what)
+    return "Hey, it's time to " + (" and ".join(bits) or "that") + "."
+
 def announce_text(timers):
-    subjects = " and ".join(timer["what"].strip() for timer in timers if timer.get("what"))
+    line = spoken_line(timers)
     wait = nag_seconds(
         min(timer["original_seconds"] for timer in timers),
         max(timer["attempts"] for timer in timers),
     )
-    return (
-        f"A reminder just went off. Say one sentence out loud that it is time to {subjects}. "
-        f"That sentence must include \"{subjects}\". "
-        "Do not answer with only okay, all right, or let's go, and do not call set_timer. "
-        f"If they do not sound finished, call retry_in with {wait}. "
-        "If they sound finished, call end_session instead, and do not call retry_in."
-    )
+    return f"Say exactly this sentence and no other words: {line} Then call retry_in once with {wait}."
 
 class Book:
     def __init__(self, path=PATH):
@@ -298,7 +302,7 @@ class Timers:
             {
                 "type": "function",
                 "name": "retry_in",
-                "description": "They have not answered the reminder. Seconds to wait before saying it again. Half a minute is 30. A couple of minutes is 120.",
+                "description": "Call once, after the reminder sentence has been spoken, if they have not answered. Do not call it again while they are talking. Seconds, not minutes.",
                 "parameters": {
                     "type": "object",
                     "properties": {"seconds": {"type": "number"}},

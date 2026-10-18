@@ -7,7 +7,7 @@ from urllib.request import urlretrieve
 
 from .config import ROOT, load_env, load_home
 from .tools import find_tool, load_tools
-from .tools.timers import announce_text
+from .tools.timers import announce_text, spoken_line
 from .transcript import Log
 
 RATE = 24000
@@ -99,8 +99,14 @@ def realtime_session(home, tools, reminder=None, memory=""):
         parts.append(memory)
     parts.extend(abilities)
     if reminder:
-        parts.append(announce_text(reminder))
-        parts.append("Quiet or the beep is not not_for_me. After you have said the reminder, television or other people is not_for_me and you say nothing.")
+        line = spoken_line(reminder)
+        parts.append(
+            f"The thing you are telling them is: {line} "
+            "If they ask what you meant or what you are talking about, say that sentence again. "
+            "Do not describe a reminder, and do not apologize instead of saying it. "
+            "If they sound finished, call end_session."
+        )
+        parts.append("Quiet or the beep is not not_for_me. After you have said it, television or other people is not_for_me and you say nothing.")
     else:
         parts.append("The session started because they said your name. A follow-up, such as 'no, purple' or another question, is still for you.")
         parts.append("If the audio is a television, other people, or anything not said to you and not a follow-up, call not_for_me and say nothing.")
@@ -299,7 +305,7 @@ async def finish_call(connection, speaker, state, name, call_id, arguments):
             if speak_now:
                 state["redo_announce"] = False
         if speak_now and not state["stop"] and state.get("announce"):
-            await speak(connection, state, state["announce"])
+            await speak(connection, state, state["announce"], state.get("aloud") or state["announce"])
     elif not (name == "set_timer" and opening) and name not in ("not_for_me", "retry_in", "acknowledge"):
         await request_reply(connection, state)
 
@@ -320,10 +326,11 @@ async def watch_idle(connection, speaker, state):
             await connection.close()
             return
 
-async def speak(connection, state, instructions):
+async def speak(connection, state, instructions, aloud):
     state["needs_announce"] = True
     state["opening"] = True
     state["announce"] = instructions
+    state["aloud"] = aloud
     state["announce_tries"] = state.get("announce_tries", 0) + 1
     if state["announce_tries"] > 3:
         return
@@ -336,7 +343,7 @@ async def speak(connection, state, instructions):
         await connection.conversation.item.create(item={
             "type": "message",
             "role": "system",
-            "content": [{"type": "input_text", "text": instructions}],
+            "content": [{"type": "input_text", "text": aloud}],
         })
     state["reminder_text"] = instructions
     await connection.response.create(response={"instructions": instructions})
@@ -360,7 +367,7 @@ async def watch_due(connection, state, book):
             continue
         names = ", ".join(timer["what"] for timer in due)
         status(f"reminder due: {names}")
-        await speak(connection, state, announce_text(due))
+        await speak(connection, state, announce_text(due), spoken_line(due))
 
 def heard_back(reason):
     return reason == "goodbye"
@@ -395,7 +402,7 @@ async def run_session(client, ear, speaker, started, current, home, tools, book,
                     state["last_engage"] = time.monotonic()
                     status(f"engaged, session ready in {time.monotonic() - started:.1f}s, {getattr(event.session, 'id', 'ready')}")
                     if reminder:
-                        await speak(connection, state, announce_text(reminder))
+                        await speak(connection, state, announce_text(reminder), spoken_line(reminder))
                     else:
                         mic = asyncio.create_task(send_audio(connection, ear))
                     watch = asyncio.create_task(watch_idle(connection, speaker, state))
@@ -438,7 +445,7 @@ async def run_session(client, ear, speaker, started, current, home, tools, book,
                         continue
                     follow = later or (state.get("announce") if redo else None)
                     if follow:
-                        await speak(connection, state, follow)
+                        await speak(connection, state, follow, state.get("aloud") or follow)
                     elif confirm:
                         await connection.response.create(response=CONFIRM)
                     if state.get("announced") and mic is None and not follow:
