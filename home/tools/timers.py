@@ -39,19 +39,19 @@ def clock(when):
 
 def describe(timer):
     said = (timer.get("said") or "").strip()
-    sentence = f" They said: {said}." if said else ""
+    sentence = f" Original wording, not a new request: {said}." if said else ""
     return (
-        f"Set at {clock(timer['set_at'])} for {length_phrase(timer['original_seconds'])}."
-        f"{sentence} Remind them about {timer['what']}."
-        f" This is spoken attempt {timer['attempts']}."
+        f"Already running since {clock(timer['set_at'])}, for {length_phrase(timer['original_seconds'])}."
+        f"{sentence} Tell them it is time: {timer['what']}."
+        f" Spoken attempt {timer['attempts']}."
     )
 
 def kickoff(timers):
     lines = [
-        "A reminder is due now. Speak first. They did not just say your name.",
-        "The room may be quiet, and the beep is not someone else talking. Say the reminder anyway.",
-        "Say one short sentence, the way you would if you had just remembered. Do not mention a timer or a system.",
-        "In that same response, call retry_in with how many seconds to wait before speaking again if they do not answer.",
+        "A reminder that is already running is due now. Nobody is asking you to set a new one.",
+        "Do not call set_timer. Do not say that you are setting, scheduling, or creating a reminder.",
+        "Say one short sentence, as if you just remembered: it is time. For example, 'Time to eat that hamburger.'",
+        "Then call retry_in with how many seconds to wait before saying it again if they do not answer.",
         "Use seconds, not minutes. About 30 for a short timer of ten minutes or less, then a bit longer on later attempts.",
         "About 120 for something longer, such as a shower in forty five minutes, then a couple of minutes more each time.",
         "If they already said they heard you, call acknowledge and do not call retry_in.",
