@@ -40,11 +40,40 @@ def load_home():
         buffer_seconds = 180
     lights = [light for light in (data.get("lights") or []) if light.get("name") and light.get("host")]
     doors = [door for door in (data.get("doors") or []) if door.get("name")]
+    showers = showers_from(data)
     if not name or not wake or not voice:
         sys.exit(f"{path} needs agent.name, agent.wake, and agent.voice")
-    if not lights and not doors:
-        sys.exit(f"No lights or doors in {path}")
+    if not lights and not doors and not showers:
+        sys.exit(f"No lights, doors, or showers in {path}")
     return {
         "name": name, "wake": wake, "voice": voice, "aliases": aliases,
         "buffer_seconds": max(5.0, buffer_seconds), "lights": lights, "doors": doors,
+        "showers": showers,
     }
+
+def showers_from(data):
+    showers = []
+    for shower in data.get("showers") or []:
+        if not shower.get("name"):
+            continue
+        presets = []
+        for preset in shower.get("presets") or []:
+            if not preset.get("name") or preset.get("index") is None:
+                continue
+            try:
+                index = int(preset["index"])
+            except (TypeError, ValueError):
+                continue
+            presets.append({"name": str(preset["name"]).strip(), "index": index})
+        try:
+            maximum = int(shower.get("max_temperature") or 110)
+        except (TypeError, ValueError):
+            maximum = 110
+        showers.append({
+            "name": str(shower["name"]).strip(),
+            "description": str(shower.get("description") or "").strip(),
+            "serial": str(shower.get("serial") or "").strip(),
+            "max_temperature": maximum,
+            "presets": presets,
+        })
+    return showers

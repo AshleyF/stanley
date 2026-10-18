@@ -68,5 +68,16 @@
       "name": "Garage",
       "description": "The garage door."
     }
+  ],
+  "showers": [
+    {
+      "name": "Shower",
+      "description": "The U by Moen shower.",
+      "max_temperature": 110,
+      "presets": [
+        {"name": "Ashley", "index": 1},
+        {"name": "Tracey", "index": 2}
+      ]
+    }
   ]
 }

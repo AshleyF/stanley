@@ -1,7 +1,10 @@
-"""Garage doors. MyQ's cloud is what the official app and Tesla use.
+"""Garage doors. Kept, and not loaded.
 
-Chamberlain blocks unofficial clients, so this call can fail even with a valid
-account. The session does not need to change when the backend does.
+On 18 October 2026 a login with the account credentials reached
+https://partner-identity.myq-cloud.com/connect/token and got 401.
+Chamberlain refuses this unofficial client. The official app and Tesla still
+work, because Tesla is a partner. A local opener replaces this file only.
+load_tools() does not return Garage, so a session never offers set_door.
 """
 
 import os
