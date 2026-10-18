@@ -1,4 +1,4 @@
-"""Listen locally for Stanley, then open one realtime session."""
+"""Listen locally for the wake word, then open one realtime session."""
 
 import asyncio, base64, contextlib, json, os, signal, sys, threading, time, zipfile
 from collections import deque
@@ -11,16 +11,31 @@ DISMISS = ("shut up", "goodbye", "good bye", "stop talking", "be quiet", "go awa
 WAKE_RATE = 16000
 MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
 
-def load_lights():
-    path = Path(__file__).with_name("lights.json")
+def load_home():
+    path = Path(__file__).with_name("home.json")
     try:
-        lights = json.loads(path.read_text()).get("lights") or []
+        data = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError) as exc:
         sys.exit(f"Could not read {path}: {exc}")
-    lights = [light for light in lights if light.get("name") and light.get("host")]
+    agent = data.get("agent") or {}
+    name = str(agent.get("name") or "").strip()
+    wake = str(agent.get("wake") or name).strip()
+    voice = str(agent.get("voice") or "").strip()
+    aliases = [str(item).strip() for item in (agent.get("wake_aliases") or []) if str(item).strip()]
+    lights = [light for light in (data.get("lights") or []) if light.get("name") and light.get("host")]
+    if not name or not wake or not voice:
+        sys.exit(f"{path} needs agent.name, agent.wake, and agent.voice")
     if not lights:
         sys.exit(f"No lights in {path}")
-    return lights
+    return {"name": name, "wake": wake, "voice": voice, "aliases": aliases, "lights": lights}
+
+def woke(text, home):
+    heard = text.casefold().split()
+    for phrase in (home["wake"], *home["aliases"]):
+        words = phrase.casefold().split()
+        if words and any(heard[i:i + len(words)] == words for i in range(len(heard) - len(words) + 1)):
+            return True
+    return False
 
 def find_light(lights, name):
     wanted = (name or "").casefold().strip()
@@ -33,21 +48,23 @@ def find_light(lights, name):
 def light_list(lights):
     return "\n".join(f"- {light['name']}: {light.get('description') or light['host']}" for light in lights)
 
-def realtime_session(lights):
+def realtime_session(home):
+    lights = home["lights"]
+    name = home["name"]
     listing = light_list(lights)
     return {
         "type": "realtime",
         "model": "gpt-realtime-2.1",
         "output_modalities": ["audio"],
         "instructions": (
-            "You are Stanley. You can change these lights, and you can answer when someone is talking to you.\n"
+            f"You are {name}. You can change these lights, and you can answer when someone is talking to you.\n"
             f"{listing}\n"
             "Call set_light only when they clearly ask to turn one of these on or off or to change its color. "
             "Use that light's name. "
             "Choose hue from 0 to 360, saturation from 0 to 100, and brightness from 0 to 100. "
             "The session started because they said your name. A follow-up, such as 'no, purple' or another question, is still for you. "
             "Answer a question to you in one or two sentences. "
-            "If the audio is a television, other people, or anything not said to you and not a follow-up, call not_for_me and say nothing. "
+            f"If the audio is a television, other people, or anything not said to you and not a follow-up, call not_for_me and say nothing. "
             "Call end_session when they say goodbye, see you later, okay thanks, shut up, stop talking, be quiet, go away, or that they are done. "
             "Say nothing when you call not_for_me or end_session."
         ),
@@ -57,7 +74,7 @@ def realtime_session(lights):
                 "format": {"type": "audio/pcm", "rate": RATE},
                 "turn_detection": {"type": "server_vad", "create_response": True, "interrupt_response": True},
             },
-            "output": {"format": {"type": "audio/pcm", "rate": RATE}, "voice": "marin"},
+            "output": {"format": {"type": "audio/pcm", "rate": RATE}, "voice": home["voice"]},
         },
         "tools": [
             {
@@ -85,7 +102,7 @@ def realtime_session(lights):
             {
                 "type": "function",
                 "name": "not_for_me",
-                "description": "The audio is not addressed to Stanley and is not a follow-up. Television, other people, or background. Say nothing.",
+                "description": f"The audio is not addressed to {name} and is not a follow-up. Television, other people, or background. Say nothing.",
                 "parameters": {"type": "object", "properties": {}},
             },
         ],
@@ -146,7 +163,7 @@ def to_16k(pcm):
     return np.interp(grid, np.arange(len(samples)), samples).astype(np.int16).tobytes()
 
 def utterance(frames):
-    # The pause after "Stanley" is what lets the spotter finish the word.
+    # The pause after the wake word is what lets the spotter finish it.
     # Keep the speech before that pause, and drop only a long quiet stretch before the sentence.
     if not frames:
         return b""
@@ -294,7 +311,7 @@ class Ear:
         self.stream.stop()
         self.stream.close()
 
-async def wait_for_stanley(ear, recognizer, shutdown):
+async def wait_for_wake(ear, recognizer, shutdown, home):
     pending = b""
     while not shutdown.is_set():
         try:
@@ -308,7 +325,7 @@ async def wait_for_stanley(ear, recognizer, shutdown):
         pending = b""
         payload = recognizer.Result() if heard else recognizer.PartialResult()
         text = json.loads(payload).get("text" if heard else "partial", "")
-        if "stanley" in text.split() or "stan lee" in text:
+        if woke(text, home):
             return
 
 async def send_audio(connection, ear):
@@ -399,18 +416,18 @@ async def watch_idle(connection, speaker, state):
             await connection.close()
             return
 
-async def session(client, ear, speaker, started, current, model, lights):
+async def session(client, ear, speaker, started, current, model, home):
     who, seen = None, set()
     state = {
         "quiet": False, "busy": False, "stop": None, "responding": False, "confirm": False,
         "drop_audio": False, "last_engage": time.monotonic(), "lock": asyncio.Lock(),
-        "lights": lights,
+        "lights": home["lights"],
     }
     mic = watch = dismiss = None
     async with client.realtime.connect(model="gpt-realtime-2.1", max_retries=0) as connection:
         current["connection"] = connection
         dismiss = asyncio.create_task(watch_dismiss(ear, speaker, connection, state, model))
-        await connection.session.update(session=realtime_session(lights), event_id="start")
+        await connection.session.update(session=realtime_session(home), event_id="start")
         try:
             async for event in connection:
                 kind = event.type
@@ -437,9 +454,9 @@ async def session(client, ear, speaker, started, current, model, lights):
                     state["last_engage"] = time.monotonic()
                     speaker.write(base64.b64decode(event.delta))
                 elif kind == "response.output_audio_transcript.delta" and event.delta and not state["quiet"]:
-                    if who != "stanley":
-                        print("\nstanley: ", end="", flush=True)
-                        who = "stanley"
+                    if who != home["name"]:
+                        print(f"\n{home['name']}: ", end="", flush=True)
+                        who = home["name"]
                     print(event.delta, end="", flush=True)
                 elif kind == "response.function_call_arguments.done" and event.call_id not in seen:
                     seen.add(event.call_id)
@@ -466,7 +483,7 @@ async def main():
     from openai import AsyncOpenAI
     from vosk import KaldiRecognizer, Model
     load_env()
-    lights = load_lights()
+    home = load_home()
     model = Model(str(wake_model()))
     loop, shutdown, current = asyncio.get_running_loop(), asyncio.Event(), {"connection": None}
     speaker, ear = Speaker(), None
@@ -482,18 +499,18 @@ async def main():
     try:
         async with AsyncOpenAI() as client:
             while not shutdown.is_set():
-                status("listening for Stanley")
+                status(f"listening for {home['wake']}")
                 recognizer = KaldiRecognizer(model, WAKE_RATE)
-                await wait_for_stanley(ear, recognizer, shutdown)
+                await wait_for_wake(ear, recognizer, shutdown, home)
                 if shutdown.is_set():
                     break
                 started = time.monotonic()
                 audio = ear.engage()
-                status("heard Stanley")
+                status(f"heard {home['wake']}")
                 speaker.write(bloop(True))
                 status(f"opening session, {len(audio) / (RATE * 2):.1f}s buffered")
                 try:
-                    reason = await session(client, ear, speaker, started, current, model, lights)
+                    reason = await session(client, ear, speaker, started, current, model, home)
                 except Exception as exc:
                     reason = str(exc).strip() or type(exc).__name__
                 if shutdown.is_set():

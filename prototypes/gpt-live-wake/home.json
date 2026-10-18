@@ -1,4 +1,10 @@
 {
+  "agent": {
+    "name": "Stanley",
+    "wake": "Stanley",
+    "wake_aliases": ["stan lee"],
+    "voice": "cedar"
+  },
   "lights": [
     {
       "name": "Black Reading Lamp",
