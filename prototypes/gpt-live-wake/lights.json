@@ -1,0 +1,9 @@
+{
+  "lights": [
+    {
+      "name": "reading lamp",
+      "host": "192.168.4.38",
+      "description": "The black reading lamp in the living room."
+    }
+  ]
+}

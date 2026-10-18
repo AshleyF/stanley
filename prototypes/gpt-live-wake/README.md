@@ -13,4 +13,4 @@ cp .env.example .env
 python lights.py
 ```
 
-The reading lamp is the Kasa bulb at `192.168.4.38`. Ctrl-C quits.
+The lights are `lights.json`: a name, an IP address, and a description of where it is. That list is what Stanley is told and what `set_light` accepts. Ctrl-C quits.

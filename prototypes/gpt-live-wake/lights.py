@@ -5,63 +5,91 @@ from collections import deque
 from pathlib import Path
 from urllib.request import urlretrieve
 
-HOST, RATE = "192.168.4.38", 24000
+RATE = 24000
 BUFFER, IDLE, FRAME = 12.0, 12.0, RATE // 50
 DISMISS = ("shut up", "goodbye", "good bye", "stop talking", "be quiet", "go away")
 WAKE_RATE = 16000
 MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
-SESSION = {
-    "type": "realtime",
-    "model": "gpt-realtime-2.1",
-    "output_modalities": ["audio"],
-    "instructions": (
-        "You are Stanley. You can change the living-room reading lamp, and you can answer when someone is talking to you. "
-        "Call set_lamp only when they clearly ask to turn that lamp on or off or to change its color. "
-        "Choose hue from 0 to 360, saturation from 0 to 100, and brightness from 0 to 100. "
-        "The session started because they said your name. A follow-up, such as 'no, purple' or another question, is still for you. "
-        "Answer a question to you in one or two sentences. "
-        "If the audio is a television, other people, or anything not said to you and not a follow-up, call not_for_me and say nothing. "
-        "Call end_session when they say goodbye, see you later, okay thanks, shut up, stop talking, be quiet, go away, or that they are done. "
-        "Say nothing when you call not_for_me or end_session."
-    ),
-    "tool_choice": "auto",
-    "audio": {
-        "input": {
-            "format": {"type": "audio/pcm", "rate": RATE},
-            "turn_detection": {"type": "server_vad", "create_response": True, "interrupt_response": True},
-        },
-        "output": {"format": {"type": "audio/pcm", "rate": RATE}, "voice": "marin"},
-    },
-    "tools": [
-        {
-            "type": "function",
-            "name": "set_lamp",
-            "description": "Turn the living-room reading lamp on or off, and set its color as HSV. A color turns it on.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "on": {"type": "boolean"},
-                    "hue": {"type": "integer", "minimum": 0, "maximum": 360},
-                    "saturation": {"type": "integer", "minimum": 0, "maximum": 100},
-                    "brightness": {"type": "integer", "minimum": 0, "maximum": 100},
-                },
-                "required": ["on"],
+
+def load_lights():
+    path = Path(__file__).with_name("lights.json")
+    try:
+        lights = json.loads(path.read_text()).get("lights") or []
+    except (OSError, json.JSONDecodeError) as exc:
+        sys.exit(f"Could not read {path}: {exc}")
+    lights = [light for light in lights if light.get("name") and light.get("host")]
+    if not lights:
+        sys.exit(f"No lights in {path}")
+    return lights
+
+def find_light(lights, name):
+    wanted = (name or "").casefold().strip()
+    for light in lights:
+        if light["name"].casefold() == wanted:
+            return light
+    hits = [light for light in lights if wanted and wanted in light["name"].casefold()]
+    return hits[0] if len(hits) == 1 else None
+
+def light_list(lights):
+    return "\n".join(f"- {light['name']}: {light.get('description') or light['host']}" for light in lights)
+
+def realtime_session(lights):
+    listing = light_list(lights)
+    return {
+        "type": "realtime",
+        "model": "gpt-realtime-2.1",
+        "output_modalities": ["audio"],
+        "instructions": (
+            "You are Stanley. You can change these lights, and you can answer when someone is talking to you.\n"
+            f"{listing}\n"
+            "Call set_light only when they clearly ask to turn one of these on or off or to change its color. "
+            "Use that light's name. "
+            "Choose hue from 0 to 360, saturation from 0 to 100, and brightness from 0 to 100. "
+            "The session started because they said your name. A follow-up, such as 'no, purple' or another question, is still for you. "
+            "Answer a question to you in one or two sentences. "
+            "If the audio is a television, other people, or anything not said to you and not a follow-up, call not_for_me and say nothing. "
+            "Call end_session when they say goodbye, see you later, okay thanks, shut up, stop talking, be quiet, go away, or that they are done. "
+            "Say nothing when you call not_for_me or end_session."
+        ),
+        "tool_choice": "auto",
+        "audio": {
+            "input": {
+                "format": {"type": "audio/pcm", "rate": RATE},
+                "turn_detection": {"type": "server_vad", "create_response": True, "interrupt_response": True},
             },
+            "output": {"format": {"type": "audio/pcm", "rate": RATE}, "voice": "marin"},
         },
-        {
-            "type": "function",
-            "name": "end_session",
-            "description": "The person is done or wants you to stop talking. Goodbye, see you later, okay thanks, shut up, stop talking, be quiet, go away.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-        {
-            "type": "function",
-            "name": "not_for_me",
-            "description": "The audio is not addressed to Stanley and is not a follow-up. Television, other people, or background. Say nothing.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    ],
-}
+        "tools": [
+            {
+                "type": "function",
+                "name": "set_light",
+                "description": "Turn one listed light on or off, and set its color as HSV. A color turns it on.\n" + listing,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "enum": [light["name"] for light in lights]},
+                        "on": {"type": "boolean"},
+                        "hue": {"type": "integer", "minimum": 0, "maximum": 360},
+                        "saturation": {"type": "integer", "minimum": 0, "maximum": 100},
+                        "brightness": {"type": "integer", "minimum": 0, "maximum": 100},
+                    },
+                    "required": ["name", "on"],
+                },
+            },
+            {
+                "type": "function",
+                "name": "end_session",
+                "description": "The person is done or wants you to stop talking. Goodbye, see you later, okay thanks, shut up, stop talking, be quiet, go away.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+            {
+                "type": "function",
+                "name": "not_for_me",
+                "description": "The audio is not addressed to Stanley and is not a follow-up. Television, other people, or background. Say nothing.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        ],
+    }
 
 def status(text):
     print(f"\n[{text}]", flush=True)
@@ -156,33 +184,41 @@ def bloop(rising):
 
     return note(low) + bytes(int(RATE * 2 * 0.04)) + note(high)
 
-async def drive(on, hue=None, saturation=None, brightness=None):
-    from kasa import DeviceConfig, Module
-    from kasa.iot import IotBulb
-    bulb = None
+async def drive(lights, name, on, hue=None, saturation=None, brightness=None):
+    from kasa import Discover, Module
+    light = find_light(lights, name)
+    if light is None:
+        print(f"\nno light named {name}", flush=True)
+        return {"error": f"no light named {name}"}
+    device = None
     try:
-        bulb = IotBulb(HOST, config=DeviceConfig(host=HOST, timeout=5))
-        await bulb.update()
+        device = await Discover.discover_single(light["host"], timeout=5)
+        await device.update()
+        label = light["name"]
         if not on:
-            await bulb.turn_off()
-            print("\nlights off", flush=True)
-            return {"on": False}
-        await bulb.turn_on()
+            await device.turn_off()
+            print(f"\n{label} off", flush=True)
+            return {"name": label, "on": False}
+        await device.turn_on()
         if hue is None:
-            print("\nlights on", flush=True)
-            return {"on": True}
+            print(f"\n{label} on", flush=True)
+            return {"name": label, "on": True}
+        bulb = device.modules.get(Module.Light)
+        if bulb is None:
+            print(f"\n{label} has no color", flush=True)
+            return {"name": label, "on": True, "error": "no color"}
         hsv = (clamp(hue, 0, 360, 0), clamp(saturation, 0, 100, 100), clamp(brightness, 0, 100, 100))
-        await bulb.modules[Module.Light].set_hsv(*hsv)
-        print(f"\nlights on, hsv {hsv[0]} {hsv[1]} {hsv[2]}", flush=True)
-        return {"on": True, "hue": hsv[0], "saturation": hsv[1], "brightness": hsv[2]}
+        await bulb.set_hsv(*hsv)
+        print(f"\n{label} on, hsv {hsv[0]} {hsv[1]} {hsv[2]}", flush=True)
+        return {"name": label, "on": True, "hue": hsv[0], "saturation": hsv[1], "brightness": hsv[2]}
     except Exception as exc:
         text = str(exc).strip() or type(exc).__name__
         print(f"\n{text}", flush=True)
         return {"error": text}
     finally:
-        if bulb is not None:
+        if device is not None:
             with contextlib.suppress(Exception):
-                await bulb.disconnect()
+                await device.disconnect()
 
 class Speaker:
     def __init__(self):
@@ -302,7 +338,7 @@ async def finish_call(connection, speaker, state, name, call_id, arguments):
         state["quiet"] = False
         state["busy"] = True
         state["last_engage"] = time.monotonic()
-        result = await drive(bool(args.get("on")), args.get("hue"), args.get("saturation"), args.get("brightness"))
+        result = await drive(state["lights"], args.get("name"), bool(args.get("on")), args.get("hue"), args.get("saturation"), args.get("brightness"))
         state["busy"] = False
         state["last_engage"] = time.monotonic()
     await connection.conversation.item.create(item={
@@ -317,7 +353,7 @@ async def finish_call(connection, speaker, state, name, call_id, arguments):
 
 CONFIRM = {
     "tool_choice": "none",
-    "instructions": "One short sentence confirming the lamp. Do not call a tool.",
+    "instructions": "One short sentence confirming the light. Do not call a tool.",
 }
 
 async def request_reply(connection, state):
@@ -363,17 +399,18 @@ async def watch_idle(connection, speaker, state):
             await connection.close()
             return
 
-async def session(client, ear, speaker, started, current, model):
+async def session(client, ear, speaker, started, current, model, lights):
     who, seen = None, set()
     state = {
         "quiet": False, "busy": False, "stop": None, "responding": False, "confirm": False,
         "drop_audio": False, "last_engage": time.monotonic(), "lock": asyncio.Lock(),
+        "lights": lights,
     }
     mic = watch = dismiss = None
     async with client.realtime.connect(model="gpt-realtime-2.1", max_retries=0) as connection:
         current["connection"] = connection
         dismiss = asyncio.create_task(watch_dismiss(ear, speaker, connection, state, model))
-        await connection.session.update(session=SESSION, event_id="start")
+        await connection.session.update(session=realtime_session(lights), event_id="start")
         try:
             async for event in connection:
                 kind = event.type
@@ -429,6 +466,7 @@ async def main():
     from openai import AsyncOpenAI
     from vosk import KaldiRecognizer, Model
     load_env()
+    lights = load_lights()
     model = Model(str(wake_model()))
     loop, shutdown, current = asyncio.get_running_loop(), asyncio.Event(), {"connection": None}
     speaker, ear = Speaker(), None
@@ -455,7 +493,7 @@ async def main():
                 speaker.write(bloop(True))
                 status(f"opening session, {len(audio) / (RATE * 2):.1f}s buffered")
                 try:
-                    reason = await session(client, ear, speaker, started, current, model)
+                    reason = await session(client, ear, speaker, started, current, model, lights)
                 except Exception as exc:
                     reason = str(exc).strip() or type(exc).__name__
                 if shutdown.is_set():
