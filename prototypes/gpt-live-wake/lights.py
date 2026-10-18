@@ -100,10 +100,10 @@ def clamp(value, lo, hi, default):
         return default
     return max(lo, min(hi, number))
 
-def loud(pcm):
+def level(pcm):
     import numpy as np
     samples = np.frombuffer(pcm, dtype=np.int16)
-    return bool(len(samples)) and float(np.abs(samples).mean()) > 400
+    return float(np.abs(samples).mean()) if len(samples) else 0.0
 
 def to_16k(pcm):
     import numpy as np
@@ -115,24 +115,30 @@ def to_16k(pcm):
     return np.interp(grid, np.arange(len(samples)), samples).astype(np.int16).tobytes()
 
 def utterance(frames):
-    gap, start, hold = 0, 0, int(0.4 * RATE / FRAME)
-    for index, (_pcm, speech) in enumerate(frames):
-        if speech:
-            gap = 0
+    # The pause after "Stanley" is what lets the spotter finish the word.
+    # Keep the speech before that pause, and drop only a long quiet stretch before the sentence.
+    if not frames:
+        return b""
+    levels = sorted(value for _pcm, value in frames)
+    floor = levels[len(levels) // 5]
+    cutoff = max(floor * 3, floor + 40)
+    speech = [value >= cutoff for _pcm, value in frames]
+    hold, pad = int(1.5 * RATE / FRAME), int(0.2 * RATE / FRAME)
+    if not any(speech):
+        return b"".join(pcm for pcm, _value in frames[-int(8 * RATE / FRAME):])
+    end = len(frames)
+    while end > 0 and not speech[end - 1]:
+        end -= 1
+    start, gap = end, 0
+    for index in range(end - 1, -1, -1):
+        if speech[index]:
+            start, gap = index, 0
         else:
             gap += 1
             if gap >= hold:
-                start = index + 1
-    audio, quiet = [], 0
-    for pcm, speech in frames[start:]:
-        if speech:
-            quiet = 0
-            audio.append(pcm)
-        else:
-            quiet += 1
-            if quiet <= 2:
-                audio.append(pcm)
-    return b"".join(audio)
+                break
+    start, end = max(0, start - pad), min(len(frames), end + pad)
+    return b"".join(pcm for pcm, _value in frames[start:end])
 
 def bloop(rising):
     import numpy as np
@@ -224,7 +230,7 @@ class Ear:
     def heard(self, indata, _frames, _time, _status):
         pcm = indata.tobytes()
         with self.lock:
-            self.ring.append((pcm, loud(pcm)))
+            self.ring.append((pcm, level(pcm)))
             mode = self.mode
         if mode == "wake":
             self.loop.call_soon_threadsafe(self.wake.put_nowait, pcm)
