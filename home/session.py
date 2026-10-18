@@ -9,6 +9,7 @@ from .config import ROOT, load_env, load_home
 from .tools import find_tool, load_tools
 
 RATE = 24000
+REALTIME_MODEL = "gpt-realtime-2.1-mini"
 IDLE, FRAME = 12.0, RATE // 50
 DISMISS = ("shut up", "goodbye", "good bye", "stop talking", "be quiet", "go away")
 WAKE_RATE = 16000
@@ -118,7 +119,7 @@ def realtime_session(home, tools):
     ]
     return {
         "type": "realtime",
-        "model": "gpt-realtime-2.1",
+        "model": REALTIME_MODEL,
         "output_modalities": ["audio"],
         "instructions": instructions,
         "tool_choice": "auto",
@@ -319,7 +320,7 @@ async def run_session(client, ear, speaker, started, current, model, home, tools
         "home": home, "tools": tools,
     }
     mic = watch = dismiss = None
-    async with client.realtime.connect(model="gpt-realtime-2.1", max_retries=0) as connection:
+    async with client.realtime.connect(model=REALTIME_MODEL, max_retries=0) as connection:
         current["connection"] = connection
         dismiss = asyncio.create_task(watch_dismiss(ear, speaker, connection, state, model))
         await connection.session.update(session=realtime_session(home, tools), event_id="start")
