@@ -7,7 +7,8 @@ from urllib.request import urlretrieve
 
 from .config import ROOT, load_env, load_home
 from .tools import find_tool, load_tools
-from .tools.timers import kickoff
+from .tools.timers import announce_text
+from .transcript import Log
 
 RATE = 24000
 REALTIME_MODEL = "gpt-realtime-2.1-mini"
@@ -90,25 +91,26 @@ def bloop(rising):
 
     return note(low) + bytes(int(RATE * 2 * 0.04)) + note(high)
 
-def realtime_session(home, tools, reminder=None):
+def realtime_session(home, tools, reminder=None, memory=""):
     name = home["name"]
     abilities = [tool.instructions(home) for tool in tools]
     abilities = [text for text in abilities if text]
+    parts = [f"You are {name}. You can answer when someone is talking to you."]
+    if memory:
+        parts.append(memory)
+    parts.extend(abilities)
     if reminder:
-        opener = "You are speaking because a reminder that was set earlier is due. Do not call set_timer.\n" + kickoff(reminder)
-        heed = "Say that it is time, in one sentence. Quiet, the beep, or other room sound is not not_for_me. After you have said the reminder, later audio that is a television or other people calls not_for_me and you say nothing."
+        parts.append(announce_text(reminder))
+        parts.append("Quiet or the beep is not not_for_me. After you have said the reminder, television or other people is not_for_me and you say nothing.")
     else:
-        opener = "The session started because they said your name. A follow-up, such as 'no, purple' or another question, is still for you."
-        heed = "If the audio is a television, other people, or anything not said to you and not a follow-up, call not_for_me and say nothing."
-    instructions = "\n".join([
-        f"You are {name}. You can answer when someone is talking to you.",
-        *abilities,
-        opener,
+        parts.append("The session started because they said your name. A follow-up, such as 'no, purple' or another question, is still for you.")
+        parts.append("If the audio is a television, other people, or anything not said to you and not a follow-up, call not_for_me and say nothing.")
+    parts.extend([
         "Answer a question to you in one or two sentences.",
-        heed,
         "Call end_session when they say goodbye, see you later, okay thanks, shut up, stop talking, be quiet, go away, or that they are done.",
         "Say nothing when you call not_for_me or end_session.",
     ])
+    instructions = "\n".join(parts)
     schemas = [schema for tool in tools for schema in tool.schemas(home)]
     schemas += [
         {
@@ -134,6 +136,7 @@ def realtime_session(home, tools, reminder=None):
             "input": {
                 "format": {"type": "audio/pcm", "rate": RATE},
                 "turn_detection": {"type": "server_vad", "create_response": True, "interrupt_response": True},
+                **({"transcription": {"model": "gpt-4o-mini-transcribe", "language": "en"}} if home.get("transcript_minutes") else {}),
             },
             "output": {"format": {"type": "audio/pcm", "rate": RATE}, "voice": home["voice"]},
         },
@@ -353,6 +356,13 @@ async def speak(connection, state, instructions):
         if state["responding"]:
             state["later"] = instructions
             return
+    if not state.get("planted"):
+        state["planted"] = True
+        await connection.conversation.item.create(item={
+            "type": "message",
+            "role": "system",
+            "content": [{"type": "input_text", "text": instructions}],
+        })
     state["reminder_text"] = instructions
     await connection.response.create(response={"instructions": instructions})
 
@@ -375,12 +385,17 @@ async def watch_due(connection, state, book):
             continue
         names = ", ".join(timer["what"] for timer in due)
         status(f"reminder due: {names}")
-        await speak(connection, state, kickoff(due))
+        await speak(connection, state, announce_text(due))
 
 def heard_back(reason):
     return reason == "goodbye" or reason in DISMISS
 
-async def run_session(client, ear, speaker, started, current, model, home, tools, book, reminder=None):
+def remember(log, who, text):
+    log.add(who, text)
+    if who == "person" and text.strip():
+        print(f"\nPerson: {text.strip()}", flush=True)
+
+async def run_session(client, ear, speaker, started, current, model, home, tools, book, log, reminder=None):
     who, seen = None, set()
     state = {
         "quiet": False, "busy": False, "stop": None, "responding": False, "confirm": False,
@@ -388,13 +403,16 @@ async def run_session(client, ear, speaker, started, current, model, home, tools
         "home": home, "tools": tools, "later": None, "reminder_text": None,
         "needs_announce": False, "announced": False, "announce": None,
         "announce_tries": 0, "got_audio": False, "redo_announce": False, "opening": False,
+        "line": "", "logged_line": False, "planted": False,
     }
     mic = watch = dismiss = due = None
     opened = False
     async with client.realtime.connect(model=REALTIME_MODEL, max_retries=0) as connection:
         current["connection"] = connection
         dismiss = asyncio.create_task(watch_dismiss(ear, speaker, connection, state, model))
-        await connection.session.update(session=realtime_session(home, tools, reminder), event_id="start")
+        await connection.session.update(
+            session=realtime_session(home, tools, reminder, log.prompt(home["name"])), event_id="start",
+        )
         try:
             async for event in connection:
                 kind = event.type
@@ -403,7 +421,7 @@ async def run_session(client, ear, speaker, started, current, model, home, tools
                     state["last_engage"] = time.monotonic()
                     status(f"engaged, session ready in {time.monotonic() - started:.1f}s, {getattr(event.session, 'id', 'ready')}")
                     if reminder:
-                        await speak(connection, state, kickoff(reminder))
+                        await speak(connection, state, announce_text(reminder))
                     else:
                         mic = asyncio.create_task(send_audio(connection, ear))
                     watch = asyncio.create_task(watch_idle(connection, speaker, state))
@@ -415,11 +433,18 @@ async def run_session(client, ear, speaker, started, current, model, home, tools
                     state["drop_audio"] = True
                     speaker.clear()
                 elif kind == "response.created":
+                    if state["line"] and not state["logged_line"]:
+                        remember(log, "assistant", state["line"])
+                    state["line"], state["logged_line"] = "", False
                     state["responding"] = True
                     state["drop_audio"] = False
                     state["got_audio"] = False
                     state["reminder_text"] = None
                 elif kind in ("response.done", "response.cancelled"):
+                    if state["line"] and not state["logged_line"]:
+                        remember(log, "assistant", state["line"])
+                        state["logged_line"] = True
+                    state["line"] = ""
                     await asyncio.sleep(0)
                     async with state["lock"]:
                         state["responding"] = False
@@ -448,10 +473,19 @@ async def run_session(client, ear, speaker, started, current, model, home, tools
                     state["last_engage"] = time.monotonic()
                     speaker.write(base64.b64decode(event.delta))
                 elif kind == "response.output_audio_transcript.delta" and event.delta and not state["quiet"]:
+                    state["line"] += event.delta
                     if who != home["name"]:
                         print(f"\n{home['name']}: ", end="", flush=True)
                         who = home["name"]
                     print(event.delta, end="", flush=True)
+                elif kind == "response.output_audio_transcript.done":
+                    text = getattr(event, "transcript", "") or state["line"]
+                    if not state["logged_line"]:
+                        remember(log, "assistant", text)
+                        state["logged_line"] = True
+                    state["line"] = ""
+                elif kind == "conversation.item.input_audio_transcription.completed":
+                    remember(log, "person", getattr(event, "transcript", "") or "")
                 elif kind == "response.function_call_arguments.done" and event.call_id not in seen:
                     seen.add(event.call_id)
                     asyncio.create_task(finish_call(connection, speaker, state, event.name, event.call_id, event.arguments))
@@ -481,7 +515,7 @@ async def main():
     from vosk import KaldiRecognizer, Model
     load_env()
     home, tools = load_home(), load_tools()
-    book = find_tool(tools, "set_timer").book
+    book, log = find_tool(tools, "set_timer").book, Log(home["transcript_minutes"])
     model = Model(str(wake_model()))
     loop, shutdown, current = asyncio.get_running_loop(), asyncio.Event(), {"connection": None}
     speaker, ear = Speaker(), None
@@ -520,7 +554,7 @@ async def main():
                 said = True
                 try:
                     reason, said = await run_session(
-                        client, ear, speaker, started, current, model, home, tools, book, reminder,
+                        client, ear, speaker, started, current, model, home, tools, book, log, reminder,
                     )
                 except Exception as exc:
                     reason = str(exc).strip() or type(exc).__name__

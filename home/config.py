@@ -38,6 +38,11 @@ def load_home():
         buffer_seconds = float(agent.get("buffer_seconds") or 180)
     except (TypeError, ValueError):
         buffer_seconds = 180
+    try:
+        raw_minutes = agent.get("transcript_minutes")
+        transcript_minutes = float(10 if raw_minutes is None else raw_minutes)
+    except (TypeError, ValueError):
+        transcript_minutes = 10
     lights = [light for light in (data.get("lights") or []) if light.get("name") and light.get("host")]
     doors = [door for door in (data.get("doors") or []) if door.get("name")]
     showers = showers_from(data)
@@ -47,7 +52,9 @@ def load_home():
         sys.exit(f"No lights, doors, or showers in {path}")
     return {
         "name": name, "wake": wake, "voice": voice, "aliases": aliases,
-        "buffer_seconds": max(5.0, buffer_seconds), "lights": lights, "doors": doors,
+        "buffer_seconds": max(5.0, buffer_seconds),
+        "transcript_minutes": min(240.0, max(0.0, transcript_minutes)),
+        "lights": lights, "doors": doors,
         "showers": showers,
     }
 

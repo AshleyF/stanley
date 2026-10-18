@@ -4,3 +4,4 @@ __pycache__/
 .wake-model/
 home/timers.json
 home/timers.json.tmp
+home/transcript.jsonl

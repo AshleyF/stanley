@@ -37,28 +37,18 @@ def nag_seconds(original_seconds, attempts):
 def clock(when):
     return time.strftime("%I:%M %p", time.localtime(when)).lstrip("0")
 
-def describe(timer):
-    said = (timer.get("said") or "").strip()
-    sentence = f" Original wording, not a new request: {said}." if said else ""
-    return (
-        f"Already running since {clock(timer['set_at'])}, for {length_phrase(timer['original_seconds'])}."
-        f"{sentence} Tell them it is time: {timer['what']}."
-        f" Spoken attempt {timer['attempts']}."
+def announce_text(timers):
+    subjects = " and ".join(timer["what"].strip() for timer in timers if timer.get("what"))
+    wait = nag_seconds(
+        min(timer["original_seconds"] for timer in timers),
+        max(timer["attempts"] for timer in timers),
     )
-
-def kickoff(timers):
-    lines = [
-        "A reminder that is already running is due now. Nobody is asking you to set a new one.",
-        "Do not call set_timer. Do not say that you are setting, scheduling, or creating a reminder.",
-        "Say one short sentence, as if you just remembered: it is time. For example, 'Time to eat that hamburger.'",
-        "Then call retry_in with how many seconds to wait before saying it again if they do not answer.",
-        "Use seconds, not minutes. About 30 for a short timer of ten minutes or less, then a bit longer on later attempts.",
-        "About 120 for something longer, such as a shower in forty five minutes, then a couple of minutes more each time.",
-        "If they already said they heard you, call acknowledge and do not call retry_in.",
-        "Do not call not_for_me instead of speaking this reminder.",
-    ]
-    lines.extend(describe(timer) for timer in timers)
-    return "\n".join(lines)
+    return (
+        f"A reminder just went off. Say one sentence out loud that it is time to {subjects}. "
+        f"That sentence must include \"{subjects}\". "
+        "Do not answer with only okay, all right, or let's go, and do not call set_timer. "
+        f"After the sentence, call retry_in with {wait}."
+    )
 
 class Book:
     def __init__(self, path=PATH):

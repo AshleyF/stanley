@@ -4,7 +4,8 @@
     "wake": "Stanley",
     "wake_aliases": ["stanley", "stan"],
     "voice": "cedar",
-    "buffer_seconds": 180
+    "buffer_seconds": 180,
+    "transcript_minutes": 10
   },
   "lights": [
     {
