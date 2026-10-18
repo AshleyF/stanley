@@ -1,4 +1,4 @@
-import pyaudio
+import pyaudio # sudo apt install python3-pyaudio
 import wave
 
 # Set up audio parameters (adjust based on your microphone's capabilities)
