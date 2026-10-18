@@ -1,6 +1,7 @@
 """Local reminders. The clock runs here. A session opens only to speak."""
 
 import json
+import re
 import time
 import uuid
 from pathlib import Path
@@ -37,15 +38,28 @@ def nag_seconds(original_seconds, attempts):
 def clock(when):
     return time.strftime("%I:%M %p", time.localtime(when)).lstrip("0")
 
+TIME_TAIL = re.compile(
+    r"\s+in\s+\d+(?:\.\d+)?\s*(?:seconds?|secs?|minutes?|mins?|hours?)\s*$",
+    re.I,
+)
+
+def fallback_line(what):
+    what = TIME_TAIL.sub("", (what or "").strip()).strip(" .")
+    if not what:
+        return "Hey, that's your timer."
+    if len(what) > 1 and what[0].isupper() and what[1].islower():
+        what = what[0].lower() + what[1:]
+    return f"Hey, it's time to {what}."
+
 def spoken_line(timers):
-    bits = []
+    lines = []
     for timer in timers:
-        what = (timer.get("what") or "").strip()
-        if len(what) > 1 and what[0].isupper() and what[1].islower():
-            what = what[0].lower() + what[1:]
-        if what:
-            bits.append(what)
-    return "Hey, it's time to " + (" and ".join(bits) or "that") + "."
+        line = (timer.get("say") or "").strip() or fallback_line(timer.get("what") or "")
+        if line and line[-1] not in ".!?":
+            line += "."
+        if line:
+            lines.append(line)
+    return " ".join(lines) or "Hey, that's your timer."
 
 def announce_text(timers):
     line = spoken_line(timers)
@@ -115,11 +129,12 @@ class Book:
         self.save()
         return due
 
-    def add(self, minutes, what, said):
+    def add(self, minutes, what, said, say):
         seconds = int(round(minutes * 60))
         timer = {
             "id": uuid.uuid4().hex[:8],
             "what": what,
+            "say": say,
             "said": said,
             "set_at": time.time(),
             "due_at": time.time() + seconds,
@@ -129,7 +144,7 @@ class Book:
         }
         self.timers.append(timer)
         self.save()
-        print(f"\ntimer {length_phrase(seconds)} — {what}", flush=True)
+        print(f"\ntimer {length_phrase(seconds)} — {say}", flush=True)
         return timer
 
     def match(self, what):
@@ -141,7 +156,7 @@ class Book:
         words = [word for word in wanted.split() if word not in skip]
         hits = []
         for timer in active:
-            hay = f"{timer['what']} {timer.get('said') or ''}".casefold()
+            hay = f"{timer['what']} {timer.get('say') or ''} {timer.get('said') or ''}".casefold()
             if wanted in hay or timer["what"].casefold() in wanted:
                 hits.append(timer)
             elif words and all(word in hay for word in words):
@@ -231,6 +246,7 @@ class Book:
             left = max(0, int(float(timer["due_at"]) - time.time()))
             items.append({
                 "what": timer["what"],
+                "say": timer.get("say") or fallback_line(timer.get("what") or ""),
                 "due_in": length_phrase(left),
                 "set_at": clock(timer["set_at"]),
                 "said": timer.get("said") or "",
@@ -255,10 +271,12 @@ class Timers:
         lines = [
             "You can set a short local timer: remind them in a few minutes, or a cooking timer.",
             "This is not a date on a calendar and not an errand list.",
-            "Call set_timer with minutes from now (20 minutes is 20, ninety seconds is 1.5), what to remind them about, and the sentence they said.",
+            "When you call set_timer, you write the sentence that will be spoken when it goes off. The wait is minutes. It is not part of the task.",
+            "\"Remind me to solve a Rubik's cube in 20 seconds\" waits about a third of a minute, then the task is solve a Rubik's cube. The sentence is about the cube, not about having 20 seconds to solve it.",
+            "A cooking timer is different. \"Set a timer for 10 minutes\" has no other task, so the sentence can say the 10 minutes are up.",
             "Call cancel_timer when they cancel one.",
             "If they ask what reminders or timers are set, call list_reminders and answer from it. Reminders from earlier sessions are still there.",
-            "When a reminder is due, say it in one natural sentence, then call retry_in with the seconds to wait if they do not answer.",
+            "When a reminder is due, say the sentence stored for it, in those words, then call retry_in once if they do not answer.",
             "A timer of about ten minutes or less is urgent: about 30 seconds, then a little longer.",
             "A longer one, such as a shower in forty five minutes, waits a couple of minutes, then a couple more.",
             "If they say they heard you — okay, thanks, got it — call acknowledge and do not call retry_in.",
@@ -272,15 +290,16 @@ class Timers:
             {
                 "type": "function",
                 "name": "set_timer",
-                "description": "Start a local timer. Minutes from now, not a clock time and not a calendar date.",
+                "description": "Start a local timer. You write, now, the exact sentence to speak when it goes off. The wait goes in minutes, not in that sentence, unless the timer itself is the whole request.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "minutes": {"type": "number", "description": "Minutes from now. Twenty minutes is 20. Ninety seconds is 1.5."},
-                        "what": {"type": "string", "description": "What to tell them when it is due, such as check the hot tub."},
+                        "minutes": {"type": "number", "description": "How long to wait. Twenty seconds is about 0.33. Twenty minutes is 20. This is the delay, not part of the task."},
+                        "what": {"type": "string", "description": "The task only, with the wait left out. 'Remind me to solve a Rubik's cube in 20 seconds' is 'solve a Rubik's cube'."},
+                        "say": {"type": "string", "description": "The exact sentence to speak when it goes off. For that cube: 'Hey, time to solve a Rubik's cube.' A bare 10 minute timer can be 'Your 10 minute timer is up.'"},
                         "said": {"type": "string", "description": "The sentence they just said."},
                     },
-                    "required": ["minutes", "what", "said"],
+                    "required": ["minutes", "what", "say", "said"],
                 },
             },
             {
@@ -321,15 +340,16 @@ class Timers:
         if name == "set_timer":
             minutes = minutes_of(args.get("minutes"))
             what = str(args.get("what") or "").strip()
+            say = str(args.get("say") or "").strip()
             said = str(args.get("said") or "").strip()
-            if minutes is None or not what:
-                return {"error": "need minutes and what"}
+            if minutes is None or not what or not say:
+                return {"error": "need minutes, what, and say. say is the sentence to speak when it goes off. Put the wait in minutes, not in say."}
             if minutes < 0.25:
                 return {"error": "too short. Use at least a quarter of a minute."}
             if minutes > 12 * 60:
                 return {"error": "too long. Twelve hours is the longest."}
-            timer = self.book.add(minutes, what, said)
-            return {"set": timer["what"], "minutes": round(minutes, 2), "due": clock(timer["due_at"])}
+            timer = self.book.add(minutes, what, said, say)
+            return {"set": timer["what"], "will_say": timer["say"], "minutes": round(minutes, 2), "due": clock(timer["due_at"])}
         if name == "cancel_timer":
             timer = self.book.cancel(args.get("what"))
             if timer is None:
