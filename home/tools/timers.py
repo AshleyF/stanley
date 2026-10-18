@@ -62,12 +62,7 @@ def spoken_line(timers):
     return " ".join(lines) or "Hey, that's your timer."
 
 def announce_text(timers):
-    line = spoken_line(timers)
-    wait = nag_seconds(
-        min(timer["original_seconds"] for timer in timers),
-        max(timer["attempts"] for timer in timers),
-    )
-    return f"Say exactly this sentence and no other words: {line} Then call retry_in once with {wait}."
+    return f"Say exactly this sentence and no other words: {spoken_line(timers)}"
 
 class Book:
     def __init__(self, path=PATH):
@@ -276,10 +271,9 @@ class Timers:
             "A cooking timer is different. \"Set a timer for 10 minutes\" has no other task, so the sentence can say the 10 minutes are up.",
             "Call cancel_timer when they cancel one.",
             "If they ask what reminders or timers are set, call list_reminders and answer from it. Reminders from earlier sessions are still there.",
-            "When a reminder is due, say the sentence stored for it, in those words, then call retry_in once if they do not answer.",
-            "A timer of about ten minutes or less is urgent: about 30 seconds, then a little longer.",
-            "A longer one, such as a shower in forty five minutes, waits a couple of minutes, then a couple more.",
-            "If they say they heard you — okay, thanks, got it — call acknowledge and do not call retry_in.",
+            "When a reminder is due, say the sentence stored for it, in those words, and do not call a tool.",
+            "If they do not answer before the session ends, it is said again later: about half a minute for a short timer, a couple of minutes for a longer one.",
+            "If they say they heard you — okay, thanks, got it — call acknowledge.",
         ]
         active = self.book.summary()
         lines.append("Reminders already waiting:\n" + active if active else "No reminders are waiting.")

@@ -269,6 +269,12 @@ async def finish_call(connection, speaker, state, name, call_id, arguments):
         async with state["lock"]:
             state["redo_announce"] = True
         print("\nreminder still due", flush=True)
+    elif name == "retry_in" and state.get("needs_announce") and not state.get("announced") and not state.get("got_audio"):
+        result = {"error": "Say the reminder out loud first. Do not call retry_in."}
+        state["quiet"] = False
+        async with state["lock"]:
+            state["redo_announce"] = True
+        print("\nsay it first", flush=True)
     elif name == "not_for_me":
         state["quiet"] = True
         speaker.clear()
@@ -346,7 +352,7 @@ async def speak(connection, state, instructions, aloud):
             "content": [{"type": "input_text", "text": aloud}],
         })
     state["reminder_text"] = instructions
-    await connection.response.create(response={"instructions": instructions})
+    await connection.response.create(response={"instructions": instructions, "tool_choice": "none"})
 
 async def listen_after(ear, speaker, connection, state):
     while not state["stop"] and speaker.playing():
@@ -365,8 +371,7 @@ async def watch_due(connection, state, book):
         due = book.claim_due()
         if not due:
             continue
-        names = ", ".join(timer["what"] for timer in due)
-        status(f"reminder due: {names}")
+        status(f"reminder due: {spoken_line(due)}")
         await speak(connection, state, announce_text(due), spoken_line(due))
 
 def heard_back(reason):
@@ -525,8 +530,7 @@ async def main():
                     continue
                 audio = ear.engage(keep=kind != "timer")
                 if reminder:
-                    names = ", ".join(timer["what"] for timer in reminder)
-                    status(f"reminder due: {names}")
+                    status(f"reminder due: {spoken_line(reminder)}")
                 else:
                     status(f"heard {home['wake']}")
                 speaker.write(bloop(True))
