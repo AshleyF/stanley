@@ -47,7 +47,8 @@ def announce_text(timers):
         f"A reminder just went off. Say one sentence out loud that it is time to {subjects}. "
         f"That sentence must include \"{subjects}\". "
         "Do not answer with only okay, all right, or let's go, and do not call set_timer. "
-        f"After the sentence, call retry_in with {wait}."
+        f"If they do not sound finished, call retry_in with {wait}. "
+        "If they sound finished, call end_session instead, and do not call retry_in."
     )
 
 class Book:

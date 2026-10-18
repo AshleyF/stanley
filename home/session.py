@@ -13,14 +13,6 @@ from .transcript import Log
 RATE = 24000
 REALTIME_MODEL = "gpt-realtime-2.1-mini"
 IDLE, FRAME = 20.0, RATE // 50
-DISMISS = ("shut up", "goodbye", "good bye", "stop talking", "be quiet", "go away")
-DONE_WORDS = {
-    "okay", "ok", "great", "good", "thanks", "thank", "you", "yeah", "yes",
-    "alright", "all", "right", "stanley", "stan", "done", "that's", "thats",
-    "we're", "were", "we", "are", "i'm", "im", "sounds", "perfect", "cool",
-    "bye", "that", "is", "so", "much", "very",
-}
-DONE_MARK = {"thanks", "thank", "done", "goodbye", "bye"}
 WAKE_RATE = 16000
 MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
 CONFIRM = {
@@ -114,8 +106,11 @@ def realtime_session(home, tools, reminder=None, memory=""):
         parts.append("If the audio is a television, other people, or anything not said to you and not a follow-up, call not_for_me and say nothing.")
     parts.extend([
         "Answer a question to you in one or two sentences.",
-        "Call end_session when they are done: goodbye, see you, okay thanks, great thanks, thank you, okay good, shut up, stop talking, be quiet, go away.",
-        "Say nothing when you call not_for_me or end_session.",
+        "You decide when the conversation is over. When they sound finished, or they want you to stop, call end_session. "
+        "Examples of that sound, not a complete list: great thanks, thanks, goodbye, okay great, the deal thanks Stanley, shut up. "
+        "Other words with that same meaning count. After a reminder, that reply means they got it. "
+        "Call the tool. Going quiet without end_session leaves the session open, which is wrong. Say nothing else when you call it.",
+        "Say nothing when you call not_for_me.",
     ])
     instructions = "\n".join(parts)
     schemas = [schema for tool in tools for schema in tool.schemas(home)]
@@ -123,7 +118,7 @@ def realtime_session(home, tools, reminder=None, memory=""):
         {
             "type": "function",
             "name": "end_session",
-            "description": "The person is done. Goodbye, see you, okay thanks, great thanks, thank you, okay good, shut up, stop talking, be quiet, go away.",
+            "description": "The person sounds finished, or wants you to stop. You judge it. Examples: great thanks, thanks, goodbye, okay great, the deal thanks Stanley. Same meaning in other words counts too.",
             "parameters": {"type": "object", "properties": {}},
         },
         {
@@ -190,7 +185,7 @@ class Ear:
         self.loop, self.speaker = loop, speaker
         self.ring, self.lock = deque(maxlen=int(buffer_seconds * RATE / FRAME)), threading.Lock()
         self.mode, self.backlog = "wake", b""
-        self.wake, self.live, self.dismiss = asyncio.Queue(), asyncio.Queue(), asyncio.Queue()
+        self.wake, self.live = asyncio.Queue(), asyncio.Queue()
         self.stream = sd.InputStream(samplerate=RATE, channels=1, dtype="int16", callback=self.heard, blocksize=FRAME)
         self.stream.start()
 
@@ -202,7 +197,6 @@ class Ear:
         if mode == "wake":
             self.loop.call_soon_threadsafe(self.wake.put_nowait, pcm)
         else:
-            self.loop.call_soon_threadsafe(self.dismiss.put_nowait, pcm)
             self.loop.call_soon_threadsafe(self.live.put_nowait, pcm)
 
     def engage(self, keep=True):
@@ -216,7 +210,7 @@ class Ear:
         with self.lock:
             self.mode = "wake"
             self.ring.clear()
-        for queue in (self.wake, self.live, self.dismiss):
+        for queue in (self.wake, self.live):
             while not queue.empty():
                 queue.get_nowait()
 
@@ -316,48 +310,6 @@ async def request_reply(connection, state):
             return
     await connection.response.create(response=CONFIRM)
 
-def dismissal(text, final=False):
-    folded = " ".join(text.casefold().split())
-    if not folded:
-        return None
-    hard = next((phrase for phrase in DISMISS if phrase in folded), None)
-    if hard:
-        return hard
-    words = folded.split()
-    if not final or not words or len(words) > 8:
-        return None
-    if any(word not in DONE_WORDS for word in words):
-        return None
-    if len(words) == 1 and words[0] not in DONE_MARK:
-        return None
-    closing = any(word in DONE_MARK for word in words) or (
-        "good" in words and any(word in {"okay", "ok", "great", "sounds", "all"} for word in words)
-    )
-    return "done" if closing else None
-
-async def watch_dismiss(ear, speaker, connection, state, model):
-    from vosk import KaldiRecognizer
-    recognizer, pending = KaldiRecognizer(model, WAKE_RATE), b""
-    while not state["stop"]:
-        try:
-            pcm = await asyncio.wait_for(ear.dismiss.get(), 0.2)
-        except asyncio.TimeoutError:
-            continue
-        pending += to_16k(pcm)
-        if len(pending) < WAKE_RATE * 2 // 5:
-            continue
-        heard = recognizer.AcceptWaveform(pending)
-        pending = b""
-        payload = recognizer.Result() if heard else recognizer.PartialResult()
-        text = json.loads(payload).get("text" if heard else "partial", "")
-        phrase = dismissal(text, final=bool(heard))
-        if phrase is None:
-            continue
-        state["stop"] = phrase
-        speaker.clear()
-        await connection.close()
-        return
-
 async def watch_idle(connection, speaker, state):
     while not state["stop"]:
         await asyncio.sleep(0.5)
@@ -411,14 +363,14 @@ async def watch_due(connection, state, book):
         await speak(connection, state, announce_text(due))
 
 def heard_back(reason):
-    return reason == "goodbye" or reason == "done" or reason in DISMISS
+    return reason == "goodbye"
 
 def remember(log, who, text):
     log.add(who, text)
     if who == "person" and text.strip():
         print(f"\nPerson: {text.strip()}", flush=True)
 
-async def run_session(client, ear, speaker, started, current, model, home, tools, book, log, reminder=None):
+async def run_session(client, ear, speaker, started, current, home, tools, book, log, reminder=None):
     who, seen = None, set()
     state = {
         "quiet": False, "busy": False, "stop": None, "responding": False, "confirm": False,
@@ -428,11 +380,10 @@ async def run_session(client, ear, speaker, started, current, model, home, tools
         "announce_tries": 0, "got_audio": False, "redo_announce": False, "opening": False,
         "line": "", "logged_line": False, "planted": False,
     }
-    mic = watch = dismiss = due = None
+    mic = watch = due = None
     opened = False
     async with client.realtime.connect(model=REALTIME_MODEL, max_retries=0) as connection:
         current["connection"] = connection
-        dismiss = asyncio.create_task(watch_dismiss(ear, speaker, connection, state, model))
         await connection.session.update(
             session=realtime_session(home, tools, reminder, log.prompt(home["name"])), event_id="start",
         )
@@ -530,7 +481,7 @@ async def run_session(client, ear, speaker, started, current, model, home, tools
                         break
         finally:
             current["connection"] = None
-            for task in (mic, watch, dismiss, due):
+            for task in (mic, watch, due):
                 if task is not None:
                     task.cancel()
     return state["stop"] or "closed", bool(state.get("announced") or not reminder)
@@ -579,7 +530,7 @@ async def main():
                 said = True
                 try:
                     reason, said = await run_session(
-                        client, ear, speaker, started, current, model, home, tools, book, log, reminder,
+                        client, ear, speaker, started, current, home, tools, book, log, reminder,
                     )
                 except Exception as exc:
                     reason = str(exc).strip() or type(exc).__name__
