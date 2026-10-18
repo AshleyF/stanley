@@ -49,6 +49,7 @@ def describe(timer):
 def kickoff(timers):
     lines = [
         "A reminder is due now. Speak first. They did not just say your name.",
+        "The room may be quiet, and the beep is not someone else talking. Say the reminder anyway.",
         "Say one short sentence, the way you would if you had just remembered. Do not mention a timer or a system.",
         "In that same response, call retry_in with how many seconds to wait before speaking again if they do not answer.",
         "Use seconds, not minutes. About 30 for a short timer of ten minutes or less, then a bit longer on later attempts.",
@@ -211,6 +212,16 @@ class Book:
         if changed:
             self.save()
 
+    def unspoken(self, ids):
+        wanted = set(ids)
+        changed = False
+        for timer in self.timers:
+            if timer["id"] in wanted and timer["status"] == "announcing" and timer["attempts"]:
+                timer["attempts"] -= 1
+                changed = True
+        if changed:
+            self.save()
+
     def next_phrase(self):
         pending = [timer for timer in self.timers if timer["status"] == "pending"]
         if not pending:
@@ -219,19 +230,31 @@ class Book:
         left = max(0, int(float(soon["due_at"]) - time.time()))
         return f", {soon['what']} in {left // 60}m{left % 60:02d}s"
 
-    def summary(self):
-        lines = []
+    def rows(self):
+        items = []
         for timer in self.active():
             left = max(0, int(float(timer["due_at"]) - time.time()))
-            lines.append(f"- {timer['what']}: due in {length_phrase(left)}")
-        return "\n".join(lines)
+            items.append({
+                "what": timer["what"],
+                "due_in": length_phrase(left),
+                "set_at": clock(timer["set_at"]),
+                "said": timer.get("said") or "",
+            })
+        return items
+
+    def summary(self):
+        return "\n".join(
+            f"- {item['what']}: due in {item['due_in']}, set at {item['set_at']}."
+            + (f" They said: {item['said']}." if item["said"] else "")
+            for item in self.rows()
+        )
 
 class Timers:
     def __init__(self):
         self.book = Book()
 
     def handles(self, name):
-        return name in ("set_timer", "cancel_timer", "retry_in", "acknowledge")
+        return name in ("set_timer", "cancel_timer", "list_reminders", "retry_in", "acknowledge")
 
     def instructions(self, _home):
         lines = [
@@ -239,14 +262,14 @@ class Timers:
             "This is not a date on a calendar and not an errand list.",
             "Call set_timer with minutes from now (20 minutes is 20, ninety seconds is 1.5), what to remind them about, and the sentence they said.",
             "Call cancel_timer when they cancel one.",
+            "If they ask what reminders or timers are set, call list_reminders and answer from it. Reminders from earlier sessions are still there.",
             "When a reminder is due, say it in one natural sentence, then call retry_in with the seconds to wait if they do not answer.",
             "A timer of about ten minutes or less is urgent: about 30 seconds, then a little longer.",
             "A longer one, such as a shower in forty five minutes, waits a couple of minutes, then a couple more.",
             "If they say they heard you — okay, thanks, got it — call acknowledge and do not call retry_in.",
         ]
         active = self.book.summary()
-        if active:
-            lines.append("Timers already set:\n" + active)
+        lines.append("Reminders already waiting:\n" + active if active else "No reminders are waiting.")
         return "\n".join(lines)
 
     def schemas(self, _home):
@@ -274,6 +297,12 @@ class Timers:
                     "properties": {"what": {"type": "string"}},
                     "required": ["what"],
                 },
+            },
+            {
+                "type": "function",
+                "name": "list_reminders",
+                "description": "List the reminders and timers still waiting, including ones set in an earlier session.",
+                "parameters": {"type": "object", "properties": {}},
             },
             {
                 "type": "function",
@@ -311,6 +340,8 @@ class Timers:
             if timer is None:
                 return {"error": "which timer?", "timers": [item["what"] for item in self.book.active()]}
             return {"cancelled": timer["what"]}
+        if name == "list_reminders":
+            return {"reminders": self.book.rows()}
         if name == "retry_in":
             try:
                 seconds = float(args.get("seconds"))
