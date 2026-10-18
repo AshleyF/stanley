@@ -6,6 +6,7 @@ from pathlib import Path
 from urllib.request import urlretrieve
 
 from .config import ROOT, load_env, load_home
+from .log import record
 from .tools import find_tool, load_tools
 from .tools.timers import announce_text, spoken_line
 from .transcript import Log
@@ -22,6 +23,12 @@ CONFIRM = {
 
 def status(text):
     print(f"\n[{text}]", flush=True)
+    kind = "status"
+    if text.startswith("engaged"):
+        kind = "engage"
+    elif text.startswith("disengaged"):
+        kind = "disengage"
+    record(kind, text)
 
 def woke(text, home):
     heard = text.casefold().split()
@@ -298,6 +305,7 @@ async def finish_call(connection, speaker, state, name, call_id, arguments):
             result = await tool.call(name, args, state["home"])
         state["busy"] = False
         state["last_engage"] = time.monotonic()
+    record("tool", f"{name} {arguments or '{}'} -> {json.dumps(result)}")
     await connection.conversation.item.create(item={
         "type": "function_call_output",
         "call_id": call_id,
@@ -379,8 +387,12 @@ def heard_back(reason):
 
 def remember(log, who, text):
     log.add(who, text)
-    if who == "person" and text.strip():
-        print(f"\nPerson: {text.strip()}", flush=True)
+    cleaned = " ".join((text or "").split())
+    if not cleaned:
+        return
+    record("person" if who == "person" else "assistant", cleaned)
+    if who == "person":
+        print(f"\nPerson: {cleaned}", flush=True)
 
 async def run_session(client, ear, speaker, started, current, home, tools, book, log, reminder=None):
     who, seen = None, set()
@@ -488,6 +500,7 @@ async def run_session(client, ear, speaker, started, current, home, tools, book,
                                 state["confirm"] = True
                         continue
                     print(f"\n{event}", flush=True)
+                    record("error", message or str(event))
                     if getattr(getattr(event, "error", None), "client_event_id", None) == "start":
                         state["stop"] = "error"
                         break
@@ -546,6 +559,7 @@ async def main():
                 except Exception as exc:
                     reason = str(exc).strip() or type(exc).__name__
                     said = False
+                    record("error", reason)
                 if not said:
                     book.unspoken(list(book.session_ids))
                 if heard_back(reason):

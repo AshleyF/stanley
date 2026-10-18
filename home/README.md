@@ -21,6 +21,10 @@ The OpenAI key already in `prototypes/gpt-live-wake/.env` is used if `home/.env`
 
 A timer is local. "Remind me in 20 minutes to check the hot tub" or "set a timer for 10 minutes" calls `set_timer`, and the clock keeps running with no session open. When it is set, the model writes the sentence to speak later, with the wait kept separate from the task. When it is due, Home opens one session and Stanley says that sentence. Asking what reminders are set calls `list_reminders`, including ones from earlier. "Okay" or "thanks" clears it. If nobody answers, it speaks again later: about half a minute for a short timer, a couple of minutes for a longer one. The waiting itself stays on the clock in `home/timers.json`.
 
-`agent.transcript_minutes` is how much recent talk is read into the next session. It starts at 10. Stanley's lines are his own transcript. What you said is transcribed on that same session, only while it is open. Set it to 0 to keep none of it.
+`agent.transcript_minutes` is how much recent talk is read into the next session. It starts at 10. Stanley's lines are his own transcript. What you said is transcribed on that same session, only while it is open. Set it to 0 to keep none of it out of the next session. The file still keeps about an hour, for issue reports.
+
+`home/home.log` records engagement, what was said, and each tool call, with the time. It is not read back into the session.
+
+If something is wrong with Stanley, say so. He asks until he understands, then writes a file in `home/issues/` with that description, the last hour of transcript, and the last hour of the log. Those files stay on this machine.
 
 `home/tools/garage.py` is still there and is not loaded. On 18 October 2026 MyQ returned 401 from `https://partner-identity.myq-cloud.com/connect/token`. The official app and Tesla still work. A local opener replaces that file, and `load_tools` is what offers it again. The door entry in `home.json` stays.

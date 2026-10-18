@@ -6,8 +6,14 @@ import time
 import uuid
 from pathlib import Path
 
+from ..log import record
+
 MAX_ATTEMPTS = 6
 PATH = Path(__file__).resolve().parents[1] / "timers.json"
+
+def note(text):
+    print(f"\n{text}", flush=True)
+    record("timer", text)
 
 def minutes_of(value):
     try:
@@ -101,7 +107,7 @@ class Book:
         for timer in self.timers:
             waiting = timer["status"] == "pending" and float(timer["due_at"]) <= now
             if waiting and timer["attempts"] >= MAX_ATTEMPTS:
-                print(f"\nstopped reminding — {timer['what']}", flush=True)
+                note(f"stopped reminding — {timer['what']}")
                 changed = True
                 continue
             kept.append(timer)
@@ -139,7 +145,7 @@ class Book:
         }
         self.timers.append(timer)
         self.save()
-        print(f"\ntimer {length_phrase(seconds)} — {say}", flush=True)
+        note(f"timer {length_phrase(seconds)} — {say}")
         return timer
 
     def match(self, what):
@@ -164,7 +170,7 @@ class Book:
             return None
         timer = hits[0]
         self.finish([timer["id"]])
-        print(f"\ncancelled — {timer['what']}", flush=True)
+        note(f"cancelled — {timer['what']}")
         return timer
 
     def retry(self, seconds):
@@ -180,7 +186,7 @@ class Book:
             timer["due_at"] = when
         self.save()
         names = ", ".join(timer["what"] for timer in hits)
-        print(f"\nagain in {seconds}s — {names}", flush=True)
+        note(f"again in {seconds}s — {names}")
         return {"seconds": seconds, "what": [timer["what"] for timer in hits]}
 
     def acknowledge(self, what=None):
@@ -192,7 +198,7 @@ class Book:
             return None
         self.finish([timer["id"] for timer in hits])
         names = ", ".join(timer["what"] for timer in hits)
-        print(f"\nheard — {names}", flush=True)
+        note(f"heard — {names}")
         return {"what": [timer["what"] for timer in hits]}
 
     def finish(self, ids):
@@ -213,7 +219,7 @@ class Book:
             timer["status"] = "pending"
             timer["due_at"] = time.time() + gap
             changed = True
-            print(f"\nagain in {gap}s — {timer['what']}", flush=True)
+            note(f"again in {gap}s — {timer['what']}")
         if changed:
             self.save()
 

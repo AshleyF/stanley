@@ -4,22 +4,27 @@ import json, time
 from pathlib import Path
 
 PATH = Path(__file__).resolve().parent / "transcript.jsonl"
+KEEP_MINUTES = 60
 
 class Log:
     def __init__(self, minutes, path=PATH):
         self.minutes, self.path = float(minutes or 0), path
+        self.keep = max(self.minutes, KEEP_MINUTES)
 
     def add(self, who, text):
         text = " ".join((text or "").split())
-        if not text or self.minutes <= 0:
+        if not text:
             return
         self.path.parent.mkdir(exist_ok=True)
         with self.path.open("a") as handle:
             handle.write(json.dumps({"t": time.time(), "who": who, "text": text}) + "\n")
         self.prune()
 
-    def rows(self):
-        cutoff = time.time() - self.minutes * 60
+    def rows(self, minutes=None):
+        window = self.keep if minutes is None else float(minutes)
+        if window <= 0:
+            return []
+        cutoff = time.time() - window * 60
         found = []
         try:
             lines = self.path.read_text().splitlines()
@@ -37,11 +42,11 @@ class Log:
     def prune(self):
         if not self.path.is_file():
             return
-        body = "".join(json.dumps(row) + "\n" for row in self.rows())
+        body = "".join(json.dumps(row) + "\n" for row in self.rows(self.keep))
         self.path.write_text(body)
 
     def prompt(self, name):
-        rows = self.rows()
+        rows = self.rows(self.minutes)
         if not rows:
             return ""
         lines = []
@@ -54,3 +59,6 @@ class Log:
             "Continue it when they are still on that subject. Do not mention this record.\n"
             + "\n".join(lines)
         )
+
+def recent(minutes, path=None):
+    return Log(minutes, PATH if path is None else path).rows(minutes)

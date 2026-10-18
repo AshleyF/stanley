@@ -5,3 +5,5 @@ __pycache__/
 home/timers.json
 home/timers.json.tmp
 home/transcript.jsonl
+home/home.log
+home/issues/
