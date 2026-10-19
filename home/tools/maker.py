@@ -14,14 +14,16 @@ LIMIT = 40000
 
 def device_api():
     return "\n".join([
-        "Lights: from home.tools.lights import Lights",
+        "This runs on this computer, inside Home. The working directory is the home package.",
+        "home is a dict already in scope. It is not a module. Do not import it.",
+        "Do not invent imports. You may import asyncio, pathlib, json, and urllib.",
+        "A light is: from home.tools.lights import Lights",
         "await Lights().call(\"set_light\", {\"name\": \"<a light name>\", \"on\": True, \"hue\": 0, \"saturation\": 100, \"brightness\": 100}, home)",
-        "on false turns it off. hue is 0 to 360. Red is 0. Green is 120. saturation and brightness are 0 to 100. Use a name from the light list.",
-        "Shower: from home.tools.shower import Shower",
+        "home is the last argument. Leaving it out fails. on false turns the light off. hue 0 is red and 120 is green. saturation and brightness are 0 to 100. Use a name from the light list.",
+        "A shower is: from home.tools.shower import Shower",
         "await Shower().call(\"set_shower\", {\"name\": \"<a shower name>\", \"action\": \"on\", \"preset\": \"<a preset>\"}, home)",
-        "action is on, off, or temperature. temperature is Fahrenheit, at or below that shower's maximum. preset is optional. Use names from the shower list.",
-        "A reminder only speaks later. It does not run code. To do something after a wait, await asyncio.sleep(seconds) and then do the work.",
-        "For anything else, write ordinary Python. The standard library, including urllib, is available.",
+        "action is on, off, or temperature. temperature is Fahrenheit, at or below that shower's maximum. The last argument is home.",
+        "print() is the answer. That text comes back to you as output. A wait is await asyncio.sleep(seconds). The conversation continues while it sleeps.",
     ])
 
 def ident(value):

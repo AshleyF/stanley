@@ -27,6 +27,6 @@ A timer is local. "Remind me in 20 minutes to check the hot tub" or "set a timer
 
 If something is wrong with Stanley, say so. He asks until he understands, then writes a file in `home/issues/` with that description, the last hour of transcript, and the last hour of those logs. Those files stay on this machine.
 
-A concrete one-off is `run_script`. Stanley writes Python, Home saves it in `home/ephemeral/`, and runs it immediately. Those files stay until you delete them. A lasting ability is still `save_tool` in `home/dynamic/`, after he has asked what it should do. He files an issue only when you explicitly tell him to. The prompt includes how to call the lights and the shower from that code. A reminder still only speaks.
+A concrete one-off is `run_script`. Stanley writes Python, Home saves it in `home/ephemeral/`, and runs it without blocking the session. What it prints, or the error, is handed back so he can answer or try again. Those files stay until you delete them. A lasting ability is still `save_tool` in `home/dynamic/`, after he has asked what it should do. He files an issue only when you explicitly tell him to. The prompt includes how to call the lights and the shower from that code. A reminder still only speaks.
 
 `home/tools/garage.py` is still there and is not loaded. On 18 October 2026 MyQ returned 401 from `https://partner-identity.myq-cloud.com/connect/token`. The official app and Tesla still work. A local opener replaces that file, and `load_tools` is what offers it again. The door entry in `home.json` stays.

@@ -328,6 +328,34 @@ async def finish_call(connection, speaker, state, name, call_id, arguments):
     elif not (name == "set_timer" and opening) and name not in ("not_for_me", "retry_in", "acknowledge"):
         await request_reply(connection, state)
 
+SCRIPT_NOTE = (
+    "A script you started has finished. The message has its output or its error. "
+    "Tell them what it printed, or the error. You may say you were running code. "
+    "If the error is a mistake in your code, call run_script again with the fix. Do not ask them to run it."
+)
+
+async def deliver_script(connection, state, text):
+    if state.get("stop"):
+        return
+    async with state["lock"]:
+        state.setdefault("notes", []).append(text)
+        busy = state["responding"]
+    if not busy:
+        await flush_notes(connection, state)
+
+async def flush_notes(connection, state):
+    async with state["lock"]:
+        if state.get("responding") or not state.get("notes"):
+            return
+        notes = state["notes"]
+        state["notes"] = []
+    await connection.conversation.item.create(item={
+        "type": "message",
+        "role": "system",
+        "content": [{"type": "input_text", "text": "\n\n".join(notes)}],
+    })
+    await connection.response.create(response={"instructions": SCRIPT_NOTE})
+
 async def request_reply(connection, state):
     async with state["lock"]:
         if state["responding"]:
@@ -338,7 +366,7 @@ async def request_reply(connection, state):
 async def watch_idle(connection, speaker, state):
     while not state["stop"]:
         await asyncio.sleep(0.5)
-        if state["busy"] or state.get("responding") or speaker.playing():
+        if state["busy"] or state.get("responding") or speaker.playing() or state.get("scripts"):
             state["last_engage"] = time.monotonic()
         elif time.monotonic() - state["last_engage"] > IDLE:
             state["stop"] = "idle"
@@ -409,11 +437,16 @@ async def run_session(client, ear, speaker, started, current, home, tools, book,
         "announce_tries": 0, "got_audio": False, "redo_announce": False, "opening": False,
         "line": "", "logged_line": False, "planted": False,
         "reminder": reminder, "memory": log.prompt(home["name"]),
+        "notes": [], "scripts": 0,
     }
     mic = watch = due = None
     opened = False
     async with client.realtime.connect(model=REALTIME_MODEL, max_retries=0) as connection:
         current["connection"] = connection
+        script_tool = find_tool(tools, "run_script")
+        if script_tool is not None:
+            script_tool.deliver = lambda text: deliver_script(connection, state, text)
+            script_tool.track = state
         await connection.session.update(
             session=realtime_session(home, tools, reminder, state["memory"]), event_id="start",
         )
@@ -464,11 +497,21 @@ async def run_session(client, ear, speaker, started, current, home, tools, book,
                             state["opening"] = False
                         redo = state.get("redo_announce") and not spoke and not state.get("announced")
                         state["redo_announce"] = False
+                        pending = [] if later or redo else list(state.get("notes") or [])
+                        if pending:
+                            state["notes"] = []
                     if state["stop"]:
                         continue
                     follow = later or (state.get("announce") if redo else None)
                     if follow:
-                        await speak(connection, state, follow, state.get("aloud") or follow)
+                        await speak(connection, state, follow, state.get("aloud") or state["announce"])
+                    elif pending:
+                        await connection.conversation.item.create(item={
+                            "type": "message",
+                            "role": "system",
+                            "content": [{"type": "input_text", "text": "\n\n".join(pending)}],
+                        })
+                        await connection.response.create(response={"instructions": SCRIPT_NOTE})
                     elif confirm:
                         await connection.response.create(response=CONFIRM)
                     if state.get("announced") and mic is None and not follow:
@@ -500,7 +543,9 @@ async def run_session(client, ear, speaker, started, current, home, tools, book,
                     if "active response in progress" in message:
                         async with state["lock"]:
                             state["responding"] = True
-                            if state["reminder_text"]:
+                            if state.get("notes"):
+                                pass
+                            elif state["reminder_text"]:
                                 state["later"] = state["reminder_text"]
                             else:
                                 state["confirm"] = True
