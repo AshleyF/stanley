@@ -329,9 +329,11 @@ async def finish_call(connection, speaker, state, name, call_id, arguments):
         await request_reply(connection, state)
 
 SCRIPT_NOTE = (
-    "A script you started has finished. The message has its output or its error. "
-    "Tell them what it printed, or the error. You may say you were running code. "
-    "If the error is a mistake in your code, call run_script again with the fix. Do not ask them to run it."
+    "A message just arrived from a script you started. "
+    "If it is still running, that text is live progress. Stay quiet when it is only progress. Speak one short sentence when the person should hear it. "
+    "If it has finished or was stopped, tell them the output or the error. "
+    "If the error is a mistake in your code, call run_script again. "
+    "stop_script stops one when they want it stopped. Do not ask them to run anything."
 )
 
 async def deliver_script(connection, state, text):

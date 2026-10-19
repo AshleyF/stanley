@@ -1,9 +1,11 @@
 """One-off Python. Saved, then run immediately."""
 
 import asyncio
+import contextvars
 import inspect
 import io
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -13,19 +15,111 @@ from .maker import LIMIT, defines_call, device_api, ident, load_module
 DIR = Path(__file__).resolve().parents[1] / "ephemeral"
 SCRIPT = "Imports on their own lines at the top, then the steps. Top-level await is allowed. Do not define a function. print is returned to you as output.\n"
 LIMIT_OUT = 8000
+LIVE_DELAY = 0.3
 
-class Tee:
-    def __init__(self, *streams):
-        self.streams = streams
+class _Router:
+    def __init__(self, slot, real):
+        self.slot, self.real = slot, real
+        self.var = None
+
+    def _streams(self):
+        current = self.var.get()
+        if not current or not current.get("on"):
+            return (self.real(),)
+        return current["out"] if self.slot == 0 else current["err"]
 
     def write(self, data):
-        for stream in self.streams:
+        streams = [stream for stream in self._streams() if stream is not None]
+        for stream in streams:
             stream.write(data)
         return len(data) if isinstance(data, str) else 0
 
     def flush(self):
-        for stream in self.streams:
-            stream.flush()
+        for stream in self._streams():
+            if stream is not None:
+                stream.flush()
+
+class Capture:
+    """Per-script stdout. Two scripts can run at once without mixing their output."""
+
+    def __init__(self):
+        self.var = contextvars.ContextVar("ephemeral_capture", default=None)
+        self.depth = 0
+        self.real_out = None
+        self.real_err = None
+        self.router_out = _Router(0, lambda: self.real_out)
+        self.router_err = _Router(1, lambda: self.real_err)
+        self.router_out.var = self.var
+        self.router_err.var = self.var
+
+    def begin(self, extras):
+        if self.depth == 0:
+            self.real_out, self.real_err = sys.stdout, sys.stderr
+            sys.stdout, sys.stderr = self.router_out, self.router_err
+        self.depth += 1
+        box = {"on": True, "out": [self.real_out, *extras], "err": [self.real_err, *extras]}
+        return self.var.set(box)
+
+    def end(self, token):
+        current = self.var.get()
+        if current:
+            current["on"] = False
+        self.var.reset(token)
+        self.depth -= 1
+        if self.depth == 0 and self.real_out is not None:
+            sys.stdout, sys.stderr = self.real_out, self.real_err
+
+CAPTURE = Capture()
+
+class Live:
+    def __init__(self, loop, push):
+        self.loop, self.push = loop, push
+        self.buf, self.waiting, self.alive = [], False, True
+        self.lock = threading.Lock()
+
+    def write(self, data):
+        if not data or not self.alive:
+            return 0
+        with self.lock:
+            if not self.alive:
+                return 0
+            self.buf.append(data)
+            if not self.waiting:
+                self.waiting = True
+                self.loop.call_soon_threadsafe(self._arm, context=contextvars.Context())
+        return len(data) if isinstance(data, str) else 0
+
+    def flush(self):
+        return None
+
+    def close(self):
+        with self.lock:
+            self.alive = False
+            self.buf = []
+            self.waiting = False
+
+    def _arm(self):
+        self.loop.call_later(LIVE_DELAY, self._flush)
+
+    def _flush(self):
+        with self.lock:
+            if not self.alive:
+                self.buf = []
+                self.waiting = False
+                return
+            text = clip("".join(self.buf))
+            self.buf = []
+            self.waiting = False
+        if text:
+            asyncio.create_task(self._send(text))
+
+    async def _send(self, text):
+        if not self.alive:
+            return
+        try:
+            await self.push(text)
+        except Exception:
+            pass
 
 def strip_fences(code):
     text = code.strip()
@@ -75,6 +169,11 @@ def with_output(result, printed):
     return payload
 
 def finished_text(payload):
+    if payload.get("stopped"):
+        lines = [f"Script {payload.get('id')} was stopped."]
+        if payload.get("output"):
+            lines.append("output:\n" + payload["output"])
+        return "\n".join(lines)
     lines = ["A script you started has finished."]
     if payload.get("error"):
         lines.append("error: " + str(payload["error"]))
@@ -89,9 +188,10 @@ class Ephemeral:
         self.directory = Path(directory)
         self.deliver = None
         self.track = None
+        self.running = {}
 
     def handles(self, name):
-        return name == "run_script"
+        return name in ("run_script", "stop_script")
 
     def instructions(self, _home):
         return "\n".join([
@@ -100,9 +200,10 @@ class Ephemeral:
             "Do not make a lasting tool for that, and do not file an issue unless they explicitly say to file an issue or a bug.",
             "A lasting ability they will ask for again is save_tool, after you have talked through what it should do.",
             "Tell them you are writing code and what it will do. Do not hide that.",
-            "run_script returns immediately with started. The conversation keeps going. A sleep does not block it.",
-            "When the script finishes, a later message has output, which is everything it printed, or error.",
-            "That output is the answer. Do not say you cannot see the machine.",
+            "run_script returns immediately with started and an id. The conversation keeps going. A sleep does not block it.",
+            "While it runs, later messages show what it prints, as it prints. That is live progress. Stay quiet unless the person should hear it.",
+            "When it finishes, a message says so and includes output or error. output is the answer. Do not say you cannot see the machine.",
+            "stop_script stops a running script. Pass its id. If only one is running, the id can be omitted. Stop one when they want it stopped.",
             "If error is a mistake in the code, fix it and call run_script again. Keep going until it works. Do not ask them to run it.",
             "Put imports on their own lines, then the steps. Top-level await is allowed. Do not define a function. Do not import home.",
             device_api(),
@@ -112,7 +213,7 @@ class Ephemeral:
         return [{
             "type": "function",
             "name": "run_script",
-            "description": "Write Python and run it on this computer now. Returns started immediately. A later message brings output (what print wrote) or error. If error is your code, fix it and call again. Tell the person you are writing code. A sleep does not block the conversation.",
+            "description": "Write Python and run it on this computer now. Returns started and an id immediately. Printed lines arrive while it runs. A finished message brings the full output or error. If error is your code, fix it and call again. Tell the person you are writing code. A sleep does not block the conversation.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -120,6 +221,14 @@ class Ephemeral:
                     "code": {"type": "string", "description": SCRIPT + device_api()},
                 },
                 "required": ["code"],
+            },
+        }, {
+            "type": "function",
+            "name": "stop_script",
+            "description": "Stop a script that is still running. Pass the id from started. Omit id if only one is running.",
+            "parameters": {
+                "type": "object",
+                "properties": {"id": {"type": "string", "description": "The script id. The file name from started."}},
             },
         }]
 
@@ -132,7 +241,9 @@ class Ephemeral:
             path = self.directory / f"{stamp}-{slug}-{time.time_ns() % 10000:04d}.py"
         return path
 
-    async def call(self, _name, args, home):
+    async def call(self, name, args, home):
+        if name == "stop_script":
+            return self.stop(args.get("id"))
         code = str(args.get("code") or "").strip()
         if not code:
             return {"error": "need the Python code"}
@@ -144,45 +255,90 @@ class Ephemeral:
         print(f"\nscript {path.name}", flush=True)
         if self.deliver is None:
             return await self._execute(path, home)
+        script_id = path.name
         if self.track is not None:
             self.track["scripts"] = self.track.get("scripts", 0) + 1
-        asyncio.create_task(self._background(path, home))
+        task = asyncio.create_task(self._background(path, home, script_id))
+        self.running[script_id] = task
         return {
             "started": True,
-            "file": path.name,
-            "note": "Tell them you are writing code and what it will do. output or error arrives in a later message. If that error is your code, fix it and call run_script again.",
+            "id": script_id,
+            "note": "Tell them you are writing code and what it will do. Printed lines arrive while it runs. stop_script with this id stops it.",
         }
 
-    async def _background(self, path, home):
+    def stop(self, script_id):
+        wanted = str(script_id or "").strip()
+        if not self.running:
+            return {"error": "no script is running"}
+        if not wanted:
+            if len(self.running) == 1:
+                wanted = next(iter(self.running))
+            else:
+                return {"error": "which script?", "running": list(self.running)}
+        task = self.running.get(wanted)
+        if task is None:
+            hits = [key for key in self.running if wanted in key]
+            if len(hits) == 1:
+                wanted, task = hits[0], self.running[hits[0]]
+        if task is None:
+            return {"error": "that script is not running", "running": list(self.running)}
+        task.cancel()
+        return {"stopping": wanted}
+
+    async def _background(self, path, home, script_id):
+        payload = {"stopped": True, "id": script_id}
         try:
-            payload = await self._execute(path, home)
+            payload = await self._execute(path, home, script_id)
+        except asyncio.CancelledError:
+            pass
         finally:
+            self.running.pop(script_id, None)
             if self.track is not None:
                 self.track["scripts"] = max(0, self.track.get("scripts", 1) - 1)
-        if self.deliver is not None:
-            await self.deliver(finished_text(payload))
+        if self.deliver is None:
+            return
+        task = asyncio.current_task()
+        if task is not None and getattr(task, "uncancel", None):
+            while task.cancelling():
+                task.uncancel()
+        await self.deliver(finished_text(payload))
 
-    async def _execute(self, path, home):
+    async def _execute(self, path, home, script_id=None):
         captured = io.StringIO()
-        stdout, stderr = sys.stdout, sys.stderr
-        sys.stdout, sys.stderr = Tee(stdout, captured), Tee(stderr, captured)
+        live = None
+        extras = [captured]
+        if self.deliver is not None and script_id:
+            live = Live(asyncio.get_running_loop(), lambda text: self.deliver(
+                f"Script {script_id} is still running. It printed:\n{text}"
+            ))
+            extras.append(live)
+        token = CAPTURE.begin(extras)
         try:
-            module_name = "e_" + path.stem.replace("-", "_")
-            module = load_module(module_name, path)
-            result = module.call({}, home)
-            if inspect.isawaitable(result):
-                result = await result
-        except Exception as exc:
-            text = str(exc).strip() or type(exc).__name__
-            printed = clip(captured.getvalue())
-            payload = {"error": text}
-            if printed:
-                payload["output"] = printed
-            print(f"\nscript failed — {text}", flush=True)
-            record("script", f"failed {path.name}: {text}")
-            return payload
+            try:
+                module_name = "e_" + path.stem.replace("-", "_")
+                module = load_module(module_name, path)
+                result = module.call({}, home)
+                if inspect.isawaitable(result):
+                    result = await result
+            except asyncio.CancelledError:
+                payload = {"stopped": True, "id": script_id}
+                printed = clip(captured.getvalue())
+                if printed:
+                    payload["output"] = printed
+                return payload
+            except Exception as exc:
+                text = str(exc).strip() or type(exc).__name__
+                printed = clip(captured.getvalue())
+                payload = {"error": text}
+                if printed:
+                    payload["output"] = printed
+                print(f"\nscript failed — {text}", flush=True)
+                record("script", f"failed {path.name}: {text}")
+                return payload
         finally:
-            sys.stdout, sys.stderr = stdout, stderr
+            if live is not None:
+                live.close()
+            CAPTURE.end(token)
         payload = with_output(result, captured.getvalue())
         if payload.get("output"):
             record("script", f"{path.name}: {payload['output']}")
