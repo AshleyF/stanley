@@ -305,12 +305,17 @@ async def finish_call(connection, speaker, state, name, call_id, arguments):
             result = await tool.call(name, args, state["home"])
         state["busy"] = False
         state["last_engage"] = time.monotonic()
+    refresh = isinstance(result, dict) and result.pop("refresh_tools", False)
     record("tool", f"{name} {arguments or '{}'} -> {json.dumps(result)}")
     await connection.conversation.item.create(item={
         "type": "function_call_output",
         "call_id": call_id,
         "output": json.dumps(result),
     })
+    if refresh and not state.get("stop"):
+        await connection.session.update(session=realtime_session(
+            state["home"], state["tools"], state.get("reminder"), state.get("memory") or "",
+        ))
     if name == "end_session":
         await connection.close()
     elif state.get("redo_announce") and not state.get("announced") and not state.get("got_audio"):
@@ -403,13 +408,14 @@ async def run_session(client, ear, speaker, started, current, home, tools, book,
         "needs_announce": False, "announced": False, "announce": None,
         "announce_tries": 0, "got_audio": False, "redo_announce": False, "opening": False,
         "line": "", "logged_line": False, "planted": False,
+        "reminder": reminder, "memory": log.prompt(home["name"]),
     }
     mic = watch = due = None
     opened = False
     async with client.realtime.connect(model=REALTIME_MODEL, max_retries=0) as connection:
         current["connection"] = connection
         await connection.session.update(
-            session=realtime_session(home, tools, reminder, log.prompt(home["name"])), event_id="start",
+            session=realtime_session(home, tools, reminder, state["memory"]), event_id="start",
         )
         try:
             async for event in connection:
