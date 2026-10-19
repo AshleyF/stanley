@@ -60,6 +60,11 @@ def _lines(path, cutoff):
         return []
     return [line for line in lines if (stamped(line) or 0) >= cutoff]
 
+def _key(path):
+    parts = path.stem.split("-")
+    extra = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else -1
+    return (parts[0], parts[1] if len(parts) > 1 else "", extra)
+
 def since(minutes, path=None):
     cutoff = time.time() - minutes * 60
     if path is not None:
@@ -69,13 +74,12 @@ def since(minutes, path=None):
     files = []
     for item in DIR.glob("*.log"):
         try:
-            modified = item.stat().st_mtime
+            if item.stat().st_mtime < cutoff:
+                continue
         except OSError:
             continue
-        if modified < cutoff:
-            continue
-        files.append((modified, item.name, item))
+        files.append(item)
     found = []
-    for _modified, _name, item in sorted(files):
+    for item in sorted(files, key=_key):
         found.extend(_lines(item, cutoff))
     return "\n".join(found)
