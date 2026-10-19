@@ -305,17 +305,12 @@ async def finish_call(connection, speaker, state, name, call_id, arguments):
             result = await tool.call(name, args, state["home"])
         state["busy"] = False
         state["last_engage"] = time.monotonic()
-    refresh = isinstance(result, dict) and result.pop("refresh_tools", False)
     record("tool", f"{name} {arguments or '{}'} -> {json.dumps(result)}")
     await connection.conversation.item.create(item={
         "type": "function_call_output",
         "call_id": call_id,
         "output": json.dumps(result),
     })
-    if refresh and not state.get("stop"):
-        await connection.session.update(session=realtime_session(
-            state["home"], state["tools"], state.get("reminder"), state.get("memory") or "",
-        ))
     if name == "end_session":
         await connection.close()
     elif state.get("redo_announce") and not state.get("announced") and not state.get("got_audio"):

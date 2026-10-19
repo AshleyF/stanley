@@ -25,8 +25,8 @@ A timer is local. "Remind me in 20 minutes to check the hot tub" or "set a timer
 
 `home/logs/` has one file per session, named by when that session started, such as `20261019-010530.log`. Each line has its own time. The file is not read back into the session.
 
-If something is wrong with Stanley, say so. He asks until he understands, then writes a file in `home/issues/` with that description, the last hour of transcript, and the last hour of those logs. Those files stay on this machine.
+Code is ephemeral. `run_script` is how Stanley does something the other tools do not. Home saves it in `home/ephemeral/` and runs it without blocking the session. Lines it prints show up while it is still running, and the final output or error comes back when it finishes. `stop_script` stops one. Those files stay until you delete them. He does not save lasting tools. The prompt includes how to call the lights and the shower from that code. A reminder still only speaks.
 
-A concrete one-off is `run_script`. Stanley writes Python, Home saves it in `home/ephemeral/`, and runs it without blocking the session. Lines it prints show up while it is still running, and the final output or error comes back when it finishes. `stop_script` stops one. Those files stay until you delete them. A lasting ability is still `save_tool` in `home/dynamic/`, after he has asked what it should do. He files an issue only when you explicitly tell him to. The prompt includes how to call the lights and the shower from that code. A reminder still only speaks.
+A deeper feature of Home, or something wrong with Stanley, is a file in `home/issues/`. He asks until he understands, then writes that description, the last hour of transcript, and the last hour of logs. Those files stay on this machine. He also writes one when you tell him to file an issue.
 
 `home/tools/garage.py` is still there and is not loaded. On 18 October 2026 MyQ returned 401 from `https://partner-identity.myq-cloud.com/connect/token`. The official app and Tesla still work. A local opener replaces that file, and `load_tools` is what offers it again. The door entry in `home.json` stays.

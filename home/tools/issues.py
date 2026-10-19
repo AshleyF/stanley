@@ -40,11 +40,13 @@ class Issues:
     def instructions(self, home):
         name = home["name"]
         return (
-            f"Call report_issue only when they explicitly tell {name} to file an issue or a bug. "
-            "Examples of that request, not a complete list: file an issue, file a bug, bug report. "
-            "Other words with that same meaning count. A problem, a missing ability, or something too hard is not that request. "
-            "If they did not ask to file one, do not file one and do not offer to. A one-off is run_script. A lasting ability is save_tool. "
-            "When they did ask, and you do not yet understand the problem, ask. Then call report_issue with a short title and a description in their terms, including what they expected. "
+            f"A request {name} can do by writing Python and running it is run_script, not an issue. "
+            "A deeper feature of Home, something that should be built in rather than run as a script, is an issue. "
+            "Ask until you understand it, then call report_issue and tell them you are filing it. "
+            "Also call report_issue when they explicitly say to file an issue or a bug. "
+            "Do not file because a script looks hard or failed. Fix the script. "
+            "Do not offer a choice, and do not talk about saving a tool. There is no tool to save. "
+            "Use a short title and a description in their terms, including what they expected. "
             "If they also sound finished, call report_issue first and end_session after."
         )
 
@@ -53,7 +55,7 @@ class Issues:
             {
                 "type": "function",
                 "name": "report_issue",
-                "description": "File an issue only after they explicitly say to file an issue or a bug. Not for a one-off and not for a new ability.",
+                "description": "File an issue for a deeper feature of Home, or when they explicitly say to file an issue or a bug. Not for something a script can do now.",
                 "parameters": {
                     "type": "object",
                     "properties": {

@@ -1,21 +1,63 @@
 """One-off Python. Saved, then run immediately."""
 
+import ast
 import asyncio
 import contextvars
+import importlib.util
 import inspect
 import io
+import re
 import sys
 import threading
 import time
 from pathlib import Path
 
 from ..log import record
-from .maker import LIMIT, defines_call, device_api, ident, load_module
 
 DIR = Path(__file__).resolve().parents[1] / "ephemeral"
 SCRIPT = "Imports on their own lines at the top, then the steps. Top-level await is allowed. Do not define a function. print is returned to you as output.\n"
+LIMIT = 40000
 LIMIT_OUT = 8000
 LIVE_DELAY = 0.3
+
+def device_api():
+    return "\n".join([
+        "This runs on this computer, inside Home. The working directory is the home package.",
+        "home is a dict already in scope. It is not a module. Do not import it.",
+        "Do not invent imports. You may import asyncio, pathlib, json, and urllib.",
+        "A light is: from home.tools.lights import Lights",
+        "await Lights().call(\"set_light\", {\"name\": \"<a light name>\", \"on\": True, \"hue\": 0, \"saturation\": 100, \"brightness\": 100}, home)",
+        "home is the last argument. Leaving it out fails. on false turns the light off. hue 0 is red and 120 is green. saturation and brightness are 0 to 100. Use a name from the light list.",
+        "A shower is: from home.tools.shower import Shower",
+        "await Shower().call(\"set_shower\", {\"name\": \"<a shower name>\", \"action\": \"on\", \"preset\": \"<a preset>\"}, home)",
+        "action is on, off, or temperature. temperature is Fahrenheit, at or below that shower's maximum. The last argument is home.",
+        "print() is the answer. That text comes back to you as output. A wait is await asyncio.sleep(seconds). The conversation continues while it sleeps.",
+    ])
+
+def ident(value):
+    cleaned = re.sub(r"[^a-z0-9_]+", "_", str(value or "").casefold()).strip("_")
+    if not cleaned or cleaned[0].isdigit():
+        return None
+    return cleaned[:40]
+
+def defines_call(code):
+    tree = ast.parse(code)
+    return any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "call"
+        for node in tree.body
+    )
+
+def load_module(script_id, path):
+    module_name = f"home_script_{script_id}"
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"could not load {path.name}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    if not callable(getattr(module, "call", None)):
+        raise TypeError("the code must define call(args, home)")
+    return module
 
 class _Router:
     def __init__(self, slot, real):
@@ -195,10 +237,10 @@ class Ephemeral:
 
     def instructions(self, _home):
         return "\n".join([
-            "When they ask for something the current tools do not do, run_script is the default.",
-            "A concrete one-off, such as blink the lights, fetch something once, or wait and then do one thing, is a script. Write it and run it now.",
-            "Do not make a lasting tool for that, and do not file an issue unless they explicitly say to file an issue or a bug.",
-            "A lasting ability they will ask for again is save_tool, after you have talked through what it should do.",
+            "When they ask for something the current tools do not do, run_script is how you do it.",
+            "Code is ephemeral. Write it and run it now. A light, a fetch, a wait, or anything else a script can do is a script.",
+            "There is no tool to save for later. Do not talk about adding one.",
+            "A deeper feature of Home, something that should be built in rather than run as a script, is an issue. Do not write a script for that.",
             "Tell them you are writing code and what it will do. Do not hide that.",
             "run_script returns immediately with started and an id. The conversation keeps going. A sleep does not block it.",
             "While it runs, later messages show what it prints, as it prints. That is live progress. Stay quiet unless the person should hear it.",
