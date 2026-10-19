@@ -242,6 +242,9 @@ class Maker:
         return "\n".join([
             "You can add, change, and remove your own tools. They are saved and can be called immediately, including in this session.",
             "A reminder only speaks later. It cannot turn a light, run a shower, or call another tool.",
+            "Before save_tool, talk with them until you know what it should do, when it should happen, and what done looks like. A clear small request is enough. Do not write code from a vague first sentence.",
+            "If you understand it and it is small enough that you are likely to get it right, save the tool. Do not file an issue for that.",
+            "If it looks complicated, slow, or unlikely to be right the first time, do not write code yet and do not file yet. Offer the choice: file an issue and have it taken care of, or try it now. Wait for their answer.",
             "To do something yourself later, or to gain an ability you do not have, save a tool. Its call can wait and then do the work.",
             "list_tools shows the id and name of each added tool. Pass an id to read that tool, including its code, before you change it.",
             "save_tool creates a tool when the id is new and replaces it when the id already exists.",
@@ -270,7 +273,7 @@ class Maker:
             {
                 "type": "function",
                 "name": "save_tool",
-                "description": "Create or replace one of your tools. A new id creates it. An existing id replaces that tool. It is callable immediately.",
+                "description": "Create or replace one of your tools after you understand what they want. A small clear ability: just save it. Something complicated: offer to file an issue or try now, and save only if they want you to try. A new id creates it. An existing id replaces it.",
                 "parameters": {
                     "type": "object",
                     "properties": {
