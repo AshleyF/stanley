@@ -14,10 +14,9 @@ LIMIT = 40000
 
 def device_api():
     return "\n".join([
-        "Code shape: async def call(args, home). args is a dict. home is the house config. Return a dict.",
         "Lights: from home.tools.lights import Lights",
-        "await Lights().call(\"set_light\", {\"name\": \"<a light name>\", \"on\": True, \"hue\": 120, \"saturation\": 100, \"brightness\": 80}, home)",
-        "on false turns it off. hue is 0 to 360, and green is 120. saturation and brightness are 0 to 100. Use a name from the light list.",
+        "await Lights().call(\"set_light\", {\"name\": \"<a light name>\", \"on\": True, \"hue\": 0, \"saturation\": 100, \"brightness\": 100}, home)",
+        "on false turns it off. hue is 0 to 360. Red is 0. Green is 120. saturation and brightness are 0 to 100. Use a name from the light list.",
         "Shower: from home.tools.shower import Shower",
         "await Shower().call(\"set_shower\", {\"name\": \"<a shower name>\", \"action\": \"on\", \"preset\": \"<a preset>\"}, home)",
         "action is on, off, or temperature. temperature is Fahrenheit, at or below that shower's maximum. preset is optional. Use names from the shower list.",
@@ -267,7 +266,7 @@ class Maker:
     def schemas(self, _home):
         code = {
             "type": "string",
-            "description": device_api(),
+            "description": "async def call(args, home). args is a dict. Return a dict.\n" + device_api(),
         }
         return [
             {
