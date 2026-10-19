@@ -3,7 +3,7 @@
     "name": "Stanley",
     "wake": "Stanley",
     "wake_aliases": ["stanley", "stan"],
-    "voice": "cedar",
+    "voice": "rex",
     "buffer_seconds": 180,
     "transcript_minutes": 10
   },

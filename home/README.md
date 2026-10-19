@@ -15,7 +15,7 @@ From inside `home/`:
 python start.py
 ```
 
-The OpenAI key already in `prototypes/gpt-live-wake/.env` is used if `home/.env` has none. `home.json` is the house: the agent's name, wake word, voice, how many seconds of talk to keep, the lights, and the shower. Preset names and `max_temperature` live on the shower entry. Temperatures are Fahrenheit, and a request above that maximum is lowered to it.
+Copy `home/.env.example` to `home/.env` and set `XAI_API_KEY`. That file stays on this machine. Stanley talks through Grok speech-to-speech (`grok-voice-3.0`). `home.json` is the house: the agent's name, wake word, voice, how many seconds of talk to keep, the lights, and the shower. `agent.voice` is a Grok voice, such as `rex`. Preset names and `max_temperature` live on the shower entry. Temperatures are Fahrenheit, and a request above that maximum is lowered to it.
 
 `set_shower` uses `MOEN_EMAIL` and `MOEN_PASSWORD`. It is the same Moen cloud and Pusher commands as `moen/moen_api.py` in [AshleyF/sandbox](https://github.com/AshleyF/sandbox/tree/main/moen). Each command logs in and disconnects, so idle listening holds no shower connection.
 

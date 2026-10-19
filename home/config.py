@@ -20,8 +20,8 @@ def load_env():
                 continue
             key, value = line.split("=", 1)
             os.environ.setdefault(key.strip(), value.strip().strip("'\""))
-    if not os.environ.get("OPENAI_API_KEY"):
-        sys.exit(f"Set OPENAI_API_KEY in {paths[0]}")
+    if not os.environ.get("XAI_API_KEY"):
+        sys.exit(f"Set XAI_API_KEY in {paths[0]}")
 
 def load_home():
     path = ROOT / "home.json"

@@ -1,6 +1,6 @@
 """Wake word, then one realtime session. A due reminder can open one too."""
 
-import asyncio, base64, json, signal, threading, time, zipfile
+import asyncio, base64, json, os, signal, threading, time, zipfile
 from collections import deque
 from pathlib import Path
 from urllib.request import urlretrieve
@@ -12,7 +12,8 @@ from .tools.timers import announce_text, spoken_line
 from .transcript import Log
 
 RATE = 24000
-REALTIME_MODEL = "gpt-realtime-2.1-mini"
+REALTIME_MODEL = "grok-voice-3.0"
+XAI_BASE = "https://api.x.ai/v1"
 IDLE, FRAME = 20.0, RATE // 50
 WAKE_RATE = 16000
 MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
@@ -141,19 +142,21 @@ def realtime_session(home, tools, reminder=None, memory=""):
             "parameters": {"type": "object", "properties": {}},
         },
     ]
+    audio_in = {"format": {"type": "audio/pcm", "rate": RATE}}
+    if home.get("transcript_minutes"):
+        terms = [name, *(home.get("aliases") or [])]
+        terms += [item.get("name") for item in (home.get("lights") or [])]
+        terms += [item.get("name") for item in (home.get("showers") or [])]
+        terms = [str(term)[:50] for term in terms if term][:100]
+        audio_in["transcription"] = {"model": "grok-transcribe", "language_hint": "en", "keyterms": terms}
     return {
-        "type": "realtime",
-        "model": REALTIME_MODEL,
-        "output_modalities": ["audio"],
+        "voice": home["voice"],
         "instructions": instructions,
-        "tool_choice": "auto",
+        "turn_detection": {"type": "server_vad"},
+        "reasoning": {"effort": "none"},
         "audio": {
-            "input": {
-                "format": {"type": "audio/pcm", "rate": RATE},
-                "turn_detection": {"type": "server_vad", "create_response": True, "interrupt_response": True},
-                **({"transcription": {"model": "gpt-4o-mini-transcribe", "language": "en"}} if home.get("transcript_minutes") else {}),
-            },
-            "output": {"format": {"type": "audio/pcm", "rate": RATE}, "voice": home["voice"]},
+            "input": audio_in,
+            "output": {"format": {"type": "audio/pcm", "rate": RATE}},
         },
         "tools": schemas,
     }
@@ -424,6 +427,14 @@ def remember(log, who, text):
     if who == "person":
         print(f"\nPerson: {cleaned}", flush=True)
 
+def note_heard(log, state, text):
+    cleaned = " ".join((text or "").split())
+    if not cleaned or cleaned == state.get("heard_logged"):
+        return
+    state["heard_logged"] = cleaned
+    state["heard"] = ""
+    remember(log, "person", cleaned)
+
 async def run_session(client, ear, speaker, started, current, home, tools, book, log, reminder=None):
     who, seen = None, set()
     state = {
@@ -468,6 +479,8 @@ async def run_session(client, ear, speaker, started, current, home, tools, book,
                     state["last_engage"] = time.monotonic()
                     speaker.clear()
                 elif kind == "response.created":
+                    if state.get("heard"):
+                        note_heard(log, state, state["heard"])
                     if state["line"] and not state["logged_line"]:
                         remember(log, "assistant", state["line"])
                     state["line"], state["logged_line"] = "", False
@@ -513,25 +526,27 @@ async def run_session(client, ear, speaker, started, current, home, tools, book,
                         await connection.response.create(response=CONFIRM)
                     if state.get("announced") and mic is None and not follow:
                         mic = asyncio.create_task(listen_after(ear, speaker, connection, state))
-                elif kind == "response.output_audio.delta" and not state["quiet"] and not state["drop_audio"]:
+                elif kind in ("response.output_audio.delta", "response.audio.delta") and not state["quiet"] and not state["drop_audio"]:
                     if state.get("needs_announce"):
                         state["got_audio"] = True
                     state["last_engage"] = time.monotonic()
                     speaker.write(base64.b64decode(event.delta))
-                elif kind == "response.output_audio_transcript.delta" and event.delta and not state["quiet"]:
+                elif kind in ("response.output_audio_transcript.delta", "response.audio_transcript.delta") and event.delta and not state["quiet"]:
                     state["line"] += event.delta
                     if who != home["name"]:
                         print(f"\n{home['name']}: ", end="", flush=True)
                         who = home["name"]
                     print(event.delta, end="", flush=True)
-                elif kind == "response.output_audio_transcript.done":
+                elif kind in ("response.output_audio_transcript.done", "response.audio_transcript.done"):
                     text = getattr(event, "transcript", "") or state["line"]
                     if not state["logged_line"]:
                         remember(log, "assistant", text)
                         state["logged_line"] = True
                     state["line"] = ""
+                elif kind == "conversation.item.input_audio_transcription.updated":
+                    state["heard"] = getattr(event, "transcript", "") or state.get("heard") or ""
                 elif kind == "conversation.item.input_audio_transcription.completed":
-                    remember(log, "person", getattr(event, "transcript", "") or "")
+                    note_heard(log, state, getattr(event, "transcript", "") or state.get("heard") or "")
                 elif kind == "response.function_call_arguments.done" and event.call_id not in seen:
                     seen.add(event.call_id)
                     asyncio.create_task(finish_call(connection, speaker, state, event.name, event.call_id, event.arguments))
@@ -578,7 +593,7 @@ async def main():
     loop.add_signal_handler(signal.SIGINT, stop)
     ear = Ear(loop, speaker, home["buffer_seconds"])
     try:
-        async with AsyncOpenAI() as client:
+        async with AsyncOpenAI(api_key=os.environ["XAI_API_KEY"], base_url=XAI_BASE) as client:
             while not shutdown.is_set():
                 status(f"listening for {home['wake']}{book.next_phrase()}")
                 recognizer = KaldiRecognizer(model, WAKE_RATE)
