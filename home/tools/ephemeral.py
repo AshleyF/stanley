@@ -1,6 +1,8 @@
 """One-off Python. Saved, then run immediately."""
 
 import inspect
+import io
+import sys
 import time
 from pathlib import Path
 
@@ -8,7 +10,21 @@ from ..log import record
 from .maker import LIMIT, defines_call, device_api, ident, load_module
 
 DIR = Path(__file__).resolve().parents[1] / "ephemeral"
-SCRIPT = "Imports on their own lines at the top, then the steps. Top-level await is allowed. Do not define a function.\n"
+SCRIPT = "Imports on their own lines at the top, then the steps. Top-level await is allowed. Do not define a function. print is returned to you as output.\n"
+LIMIT_OUT = 8000
+
+class Tee:
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for stream in self.streams:
+            stream.write(data)
+        return len(data) if isinstance(data, str) else 0
+
+    def flush(self):
+        for stream in self.streams:
+            stream.flush()
 
 def strip_fences(code):
     text = code.strip()
@@ -39,6 +55,24 @@ def prepare(code):
     indented = "\n".join(("    " + line) if line.strip() else "" for line in body)
     return "\n".join(head + ["async def call(args, home):", indented]) + "\n"
 
+def clip(text):
+    text = (text or "").strip()
+    if len(text) <= LIMIT_OUT:
+        return text
+    return text[:LIMIT_OUT] + "\n..."
+
+def with_output(result, printed):
+    printed = clip(printed)
+    if result is None:
+        payload = {"ok": True}
+    elif isinstance(result, dict):
+        payload = dict(result)
+    else:
+        payload = {"result": result}
+    if printed:
+        payload["output"] = printed
+    return payload
+
 class Ephemeral:
     def __init__(self, directory=DIR):
         self.directory = Path(directory)
@@ -54,6 +88,7 @@ class Ephemeral:
             "A lasting ability they will ask for again is save_tool, after you have talked through what it should do.",
             "Put imports on their own lines, then the steps. A wait is await asyncio.sleep(seconds). Do not define a function.",
             "If the tool result has an error, say that error. Do not say it failed without the error.",
+            "output in the tool result is what the script printed. That is the result. Do not say you cannot see it.",
             device_api(),
         ])
 
@@ -91,6 +126,9 @@ class Ephemeral:
         runnable = prepare(code)
         path.write_text(runnable)
         print(f"\nscript {path.name}", flush=True)
+        captured = io.StringIO()
+        stdout, stderr = sys.stdout, sys.stderr
+        sys.stdout, sys.stderr = Tee(stdout, captured), Tee(stderr, captured)
         try:
             module_name = "e_" + path.stem.replace("-", "_")
             module = load_module(module_name, path)
@@ -99,11 +137,13 @@ class Ephemeral:
                 result = await result
         except Exception as exc:
             text = str(exc).strip() or type(exc).__name__
+            printed = clip(captured.getvalue())
             print(f"\nscript failed — {text}", flush=True)
             record("script", f"failed {path.name}: {text}")
-            return {"error": text}
-        if result is None:
-            return {"ok": True}
-        if isinstance(result, dict):
-            return result
-        return {"result": result}
+            payload = {"error": text}
+            if printed:
+                payload["output"] = printed
+            return payload
+        finally:
+            sys.stdout, sys.stderr = stdout, stderr
+        return with_output(result, captured.getvalue())
