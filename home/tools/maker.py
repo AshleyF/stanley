@@ -12,6 +12,19 @@ DIR = Path(__file__).resolve().parents[1] / "dynamic"
 MANIFEST = DIR / "manifest.json"
 LIMIT = 40000
 
+def device_api():
+    return "\n".join([
+        "Code shape: async def call(args, home). args is a dict. home is the house config. Return a dict.",
+        "Lights: from home.tools.lights import Lights",
+        "await Lights().call(\"set_light\", {\"name\": \"<a light name>\", \"on\": True, \"hue\": 120, \"saturation\": 100, \"brightness\": 80}, home)",
+        "on false turns it off. hue is 0 to 360, and green is 120. saturation and brightness are 0 to 100. Use a name from the light list.",
+        "Shower: from home.tools.shower import Shower",
+        "await Shower().call(\"set_shower\", {\"name\": \"<a shower name>\", \"action\": \"on\", \"preset\": \"<a preset>\"}, home)",
+        "action is on, off, or temperature. temperature is Fahrenheit, at or below that shower's maximum. preset is optional. Use names from the shower list.",
+        "A reminder only speaks later. It does not run code. To do something after a wait, await asyncio.sleep(seconds) and then do the work.",
+        "For anything else, write ordinary Python. The standard library, including urllib, is available.",
+    ])
+
 def ident(value):
     cleaned = re.sub(r"[^a-z0-9_]+", "_", str(value or "").casefold()).strip("_")
     if not cleaned or cleaned[0].isdigit():
@@ -240,25 +253,21 @@ class Maker:
 
     def instructions(self, _home):
         return "\n".join([
-            "You can add, change, and remove your own tools. They are saved and can be called immediately, including in this session.",
-            "A reminder only speaks later. It cannot turn a light, run a shower, or call another tool.",
-            "Before save_tool, talk with them until you know what it should do, when it should happen, and what done looks like. A clear small request is enough. Do not write code from a vague first sentence.",
-            "If you understand it and it is small enough that you are likely to get it right, save the tool. Do not file an issue for that.",
-            "If it looks complicated, slow, or unlikely to be right the first time, do not write code yet and do not file yet. Offer the choice: file an issue and have it taken care of, or try it now. Wait for their answer.",
-            "To do something yourself later, or to gain an ability you do not have, save a tool. Its call can wait and then do the work.",
+            "You can add, change, and remove lasting tools. They are saved and can be called immediately, including in this session.",
+            "A concrete one-off is run_script, not save_tool. Blink the lights, fetch something once, or wait and then do one thing.",
+            "save_tool is for an ability they will ask for again. Before you save one, talk until you know what it should do, when it should happen, and what done looks like.",
+            "Do not file an issue unless they explicitly say to file an issue or a bug.",
+            "Call devices with the same code run_script uses.",
             "list_tools shows the id and name of each added tool. Pass an id to read that tool, including its code, before you change it.",
             "save_tool creates a tool when the id is new and replaces it when the id already exists.",
             "delete_tool removes one by id.",
-            "The code runs on this machine. Define call(args, home). args is a dict and home is the house config. Return a dict.",
-            "Use async def call and await when the work waits. import asyncio, then await asyncio.sleep(seconds), works while this process stays running.",
-            "Existing devices can be imported. A light is: from home.tools.lights import Lights, then await Lights().call(\"set_light\", {\"name\": \"...\", \"on\": True, \"hue\": 120, \"saturation\": 100, \"brightness\": 80}, home).",
             self.shelf.summary(),
         ])
 
     def schemas(self, _home):
         code = {
             "type": "string",
-            "description": "Python. Top-level async def call(args, home) or def call(args, home). Return a dict. A delay is await asyncio.sleep. A light is await Lights().call(\"set_light\", {...}, home) after importing Lights from home.tools.lights.",
+            "description": device_api(),
         }
         return [
             {
@@ -273,7 +282,7 @@ class Maker:
             {
                 "type": "function",
                 "name": "save_tool",
-                "description": "Create or replace one of your tools after you understand what they want. A small clear ability: just save it. Something complicated: offer to file an issue or try now, and save only if they want you to try. A new id creates it. An existing id replaces it.",
+                "description": "Create or replace a lasting tool they will ask for again. Not for a one-off; that is run_script. Talk first. A new id creates it. An existing id replaces it. Do not use this instead of an explicit request to file an issue.",
                 "parameters": {
                     "type": "object",
                     "properties": {

@@ -40,15 +40,11 @@ class Issues:
     def instructions(self, home):
         name = home["name"]
         return (
-            f"Someone can report a problem with {name}, or with something {name} did. "
-            "Examples of that sound, not a complete list: bug report, there's a bug, something's wrong, can you try to fix that. "
-            "Other words with that same meaning count. "
-            "A normal request, such as turning on a light, is not a report. "
-            "If you do not yet understand what went wrong, ask. Do not call report_issue before that. "
-            "A missing ability is not automatically an issue. If you can add it with a tool and you are likely to get it right, do that instead. "
-            "If the ability looks complicated, slow, or unlikely to be right the first time, offer the choice out loud: file an issue and have it taken care of, or try it now. "
-            "Call report_issue only once you understand, and only when they reported a problem you are not fixing yourself, or they chose the issue. "
-            "The description is in their terms, including what they expected. "
+            f"Call report_issue only when they explicitly tell {name} to file an issue or a bug. "
+            "Examples of that request, not a complete list: file an issue, file a bug, bug report. "
+            "Other words with that same meaning count. A problem, a missing ability, or something too hard is not that request. "
+            "If they did not ask to file one, do not file one and do not offer to. A one-off is run_script. A lasting ability is save_tool. "
+            "When they did ask, and you do not yet understand the problem, ask. Then call report_issue with a short title and a description in their terms, including what they expected. "
             "If they also sound finished, call report_issue first and end_session after."
         )
 
@@ -57,7 +53,7 @@ class Issues:
             {
                 "type": "function",
                 "name": "report_issue",
-                "description": "Save a problem with Stanley once you understand it. Not for a request you can still do, and not for a small ability you are about to add. Use it when they want an issue filed, including after they choose that over having you try.",
+                "description": "File an issue only after they explicitly say to file an issue or a bug. Not for a one-off and not for a new ability.",
                 "parameters": {
                     "type": "object",
                     "properties": {
