@@ -1,12 +1,13 @@
-"""One running log of what Home is doing. Bug reports copy from it."""
+"""One log file per session, named by the time the session started."""
 
 import time
 import threading
 from pathlib import Path
 
-PATH = Path(__file__).resolve().parent / "home.log"
+DIR = Path(__file__).resolve().parent / "logs"
 KEEP_SECONDS = 2 * 24 * 3600
 LOCK = threading.Lock()
+_current = None
 
 def stamped(line):
     try:
@@ -14,33 +15,67 @@ def stamped(line):
     except (ValueError, OverflowError):
         return None
 
+def _open():
+    global _current
+    DIR.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    path = DIR / f"{stamp}.log"
+    if path.exists():
+        path = DIR / f"{stamp}-{time.time_ns() % 10000:04d}.log"
+    _current = path
+    path.write_text(f"{time.strftime('%Y-%m-%d %H:%M:%S')} | log | {path.name}\n")
+    _prune()
+    return path
+
+def begin():
+    with LOCK:
+        return _open()
+
 def record(kind, text):
     text = " ".join(str(text or "").split())
     if not text:
         return
     line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} | {kind} | {text}\n"
     with LOCK:
-        PATH.parent.mkdir(exist_ok=True)
-        with PATH.open("a") as handle:
+        if _current is None:
+            _open()
+        with _current.open("a") as handle:
             handle.write(line)
-        prune()
 
-def prune():
-    if not PATH.is_file():
+def _prune():
+    if not DIR.is_dir():
         return
     cutoff = time.time() - KEEP_SECONDS
-    kept = []
-    for line in PATH.read_text().splitlines():
-        when = stamped(line)
-        if when is None or when >= cutoff:
-            kept.append(line)
-    PATH.write_text(("\n".join(kept) + "\n") if kept else "")
+    for path in DIR.glob("*.log"):
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+        except OSError:
+            continue
 
-def since(minutes, path=None):
-    path = PATH if path is None else path
-    cutoff = time.time() - minutes * 60
+def _lines(path, cutoff):
     try:
         lines = path.read_text().splitlines()
     except OSError:
+        return []
+    return [line for line in lines if (stamped(line) or 0) >= cutoff]
+
+def since(minutes, path=None):
+    cutoff = time.time() - minutes * 60
+    if path is not None:
+        return "\n".join(_lines(path, cutoff))
+    if not DIR.is_dir():
         return ""
-    return "\n".join(line for line in lines if (stamped(line) or 0) >= cutoff)
+    files = []
+    for item in DIR.glob("*.log"):
+        try:
+            modified = item.stat().st_mtime
+        except OSError:
+            continue
+        if modified < cutoff:
+            continue
+        files.append((modified, item.name, item))
+    found = []
+    for _modified, _name, item in sorted(files):
+        found.extend(_lines(item, cutoff))
+    return "\n".join(found)

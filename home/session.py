@@ -6,7 +6,7 @@ from pathlib import Path
 from urllib.request import urlretrieve
 
 from .config import ROOT, load_env, load_home
-from .log import record
+from .log import begin, record
 from .tools import find_tool, load_tools
 from .tools.timers import announce_text, spoken_line
 from .transcript import Log
@@ -542,6 +542,7 @@ async def main():
                 if kind == "timer" and not reminder:
                     continue
                 audio = ear.engage(keep=kind != "timer")
+                begin()
                 if reminder:
                     status(f"reminder due: {spoken_line(reminder)}")
                 else:

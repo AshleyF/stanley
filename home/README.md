@@ -23,8 +23,8 @@ A timer is local. "Remind me in 20 minutes to check the hot tub" or "set a timer
 
 `agent.transcript_minutes` is how much recent talk is read into the next session. It starts at 10. Stanley's lines are his own transcript. What you said is transcribed on that same session, only while it is open. Set it to 0 to keep none of it out of the next session. The file still keeps about an hour, for issue reports.
 
-`home/home.log` records engagement, what was said, and each tool call, with the time. It is not read back into the session.
+`home/logs/` has one file per session, named by when that session started, such as `20261019-010530.log`. Each line has its own time. The file is not read back into the session.
 
-If something is wrong with Stanley, say so. He asks until he understands, then writes a file in `home/issues/` with that description, the last hour of transcript, and the last hour of the log. Those files stay on this machine.
+If something is wrong with Stanley, say so. He asks until he understands, then writes a file in `home/issues/` with that description, the last hour of transcript, and the last hour of those logs. Those files stay on this machine.
 
 `home/tools/garage.py` is still there and is not loaded. On 18 October 2026 MyQ returned 401 from `https://partner-identity.myq-cloud.com/connect/token`. The official app and Tesla still work. A local opener replaces that file, and `load_tools` is what offers it again. The door entry in `home.json` stays.
